@@ -23,6 +23,7 @@ from database import (
     get_user_by_id,
     init_db,
     list_users,
+    regenerate_user_stream_key,
     set_user_active,
     update_user_password,
     update_restream_settings,
@@ -76,6 +77,67 @@ def bool_value(value: Any) -> bool:
     """Convert SQLite 0/1 values to booleans for Streamlit widgets."""
 
     return bool(int(value or 0))
+
+
+def is_valid_rtmp_url(value: str) -> bool:
+    """Validate the RTMP URL schemes supported by FFmpeg FLV output."""
+
+    normalized_value = value.strip().lower()
+    return normalized_value.startswith(("rtmp://", "rtmps://"))
+
+
+def validate_restream_settings(settings: dict[str, Any]) -> list[str]:
+    """Return user-facing validation errors for enabled restream platforms."""
+
+    errors: list[str] = []
+    if settings.get("yt_active") and not str(settings.get("yt_key") or "").strip():
+        errors.append("YouTube включен, но ключ потока не заполнен.")
+
+    platforms = [
+        ("vk", "VK"),
+        ("rt", "Rutube"),
+        ("tg", "Telegram"),
+        ("custom", "Custom RTMP"),
+    ]
+    for prefix, title in platforms:
+        if not settings.get(f"{prefix}_active"):
+            continue
+
+        url = str(settings.get(f"{prefix}_url") or "").strip()
+        key = str(settings.get(f"{prefix}_key") or "").strip()
+        if not url:
+            errors.append(f"{title}: RTMP URL обязателен, если площадка включена.")
+        elif not is_valid_rtmp_url(url):
+            errors.append(f"{title}: RTMP URL должен начинаться с rtmp:// или rtmps://.")
+        if not key:
+            errors.append(f"{title}: ключ потока обязателен, если площадка включена.")
+
+    return errors
+
+
+def render_obs_instructions(user: dict[str, Any]) -> None:
+    """Show OBS setup guidance directly in the client account."""
+
+    with st.expander("Инструкция для OBS и YouTube", expanded=True):
+        st.markdown(
+            f"""
+            **OBS -> Settings -> Stream**
+
+            - Service: `Custom`
+            - Server: `{OBS_SERVER_URL}`
+            - Stream Key: `{user["stream_key"]}`
+
+            **OBS -> Settings -> Output -> Streaming**
+
+            - Rate Control: `CBR`
+            - Bitrate: `3000-4500 Kbps` для 720p30 или `4500-6000 Kbps` для 1080p30
+            - Keyframe Interval: `2`
+            - Profile: `high`
+
+            После изменения площадок в кабинете нажмите **Сохранить изменения**,
+            полностью остановите эфир в OBS и запустите его заново.
+            """
+        )
 
 
 def render_auth_page() -> None:
@@ -180,9 +242,33 @@ def render_client_dashboard() -> None:
         "В OBS укажите URL сервера и ключ потока выше. "
         "FFmpeg будет запущен автоматически после webhook `/on_publish` от SRS."
     )
+    render_obs_instructions(user)
+
+    with st.expander("Безопасность stream key", expanded=False):
+        st.warning(
+            "Генерация нового ключа остановит текущий эфир для старого ключа. "
+            "После этого нужно заменить Stream Key в OBS."
+        )
+        confirm_key_reset = st.checkbox(
+            "Я понимаю, что старый stream key перестанет работать.",
+            key="client_confirm_stream_key_reset",
+        )
+        if st.button("Сгенерировать новый stream key", disabled=not confirm_key_reset):
+            stop_remote_stream(user["stream_key"])
+            success, message, new_stream_key = regenerate_user_stream_key(int(user["id"]))
+            if success:
+                st.success(f"{message} Новый ключ: {new_stream_key}")
+                refresh_current_user()
+                st.rerun()
+            else:
+                st.error(message)
 
     st.subheader("Площадки для рестрима")
     st.caption("Поток отправляется в режиме pass-through (`-c copy`) без перекодирования.")
+    st.warning(
+        "После изменения площадок нажмите 'Сохранить изменения' и перезапустите поток в OBS. "
+        "Текущий FFmpeg-процесс не перечитывает настройки на лету."
+    )
 
     with st.form("restream_settings_form"):
         settings: dict[str, Any] = {}
@@ -209,9 +295,14 @@ def render_client_dashboard() -> None:
         submitted = st.form_submit_button("Сохранить изменения")
 
     if submitted:
-        update_restream_settings(int(user["id"]), settings)
-        st.success("Настройки сохранены.")
-        refresh_current_user()
+        errors = validate_restream_settings(settings)
+        if errors:
+            for error in errors:
+                st.error(error)
+        else:
+            update_restream_settings(int(user["id"]), settings)
+            st.success("Настройки сохранены. Остановите и заново запустите эфир в OBS.")
+            refresh_current_user()
 
     st.divider()
     if st.button("Выйти из аккаунта"):
@@ -361,6 +452,30 @@ def render_admin_dashboard() -> None:
             success, message = update_user_password(int(selected_user["id"]), new_password)
             if success:
                 st.success(message)
+            else:
+                st.error(message)
+
+    with st.form("admin_stream_key_form"):
+        st.write("Сброс stream key выбранного пользователя")
+        st.caption(
+            "Если пользователь сейчас в эфире, активный FFmpeg-процесс будет остановлен. "
+            "Пользователю потребуется вставить новый ключ в OBS."
+        )
+        confirm_stream_key_reset = st.checkbox(
+            f"Подтверждаю сброс stream key для {selected_user['username']}",
+            key=f"admin_confirm_stream_key_reset_{selected_user['id']}",
+        )
+        key_submitted = st.form_submit_button("Сгенерировать новый stream key")
+
+    if key_submitted:
+        if not confirm_stream_key_reset:
+            st.error("Подтвердите сброс stream key.")
+        else:
+            stop_remote_stream(selected_user["stream_key"])
+            success, message, new_stream_key = regenerate_user_stream_key(int(selected_user["id"]))
+            if success:
+                st.success(f"{message} Новый ключ: {new_stream_key}")
+                st.rerun()
             else:
                 st.error(message)
 

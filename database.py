@@ -257,6 +257,31 @@ def update_user_password(user_id: int, new_password: str) -> tuple[bool, str]:
     return True, "Пароль обновлен."
 
 
+def regenerate_user_stream_key(user_id: int) -> tuple[bool, str, str | None]:
+    """Generate and store a new OBS/SRS stream key for a user."""
+
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT username FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+        if row is None:
+            return False, "Пользователь не найден.", None
+
+        for _ in range(5):
+            stream_key = generate_stream_key(row["username"])
+            try:
+                connection.execute(
+                    "UPDATE users SET stream_key = ? WHERE id = ?",
+                    (stream_key, user_id),
+                )
+                return True, "Новый stream key сгенерирован.", stream_key
+            except sqlite3.IntegrityError:
+                continue
+
+    return False, "Не удалось сгенерировать уникальный stream key.", None
+
+
 def get_enabled_platform_names(user: dict[str, Any]) -> list[str]:
     """Return human-readable names of enabled destination platforms."""
 
