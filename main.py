@@ -22,10 +22,31 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, Header, HTTPException, Request
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
-from database import DATABASE_PATH, get_active_user_by_stream_key, get_enabled_destinations
+from database import (
+    DATABASE_PATH,
+    authenticate_user,
+    change_user_password,
+    create_auth_session,
+    create_database_backup,
+    create_user,
+    delete_auth_session,
+    get_active_user_by_stream_key,
+    get_enabled_destinations,
+    get_user_by_id,
+    get_user_by_session_token,
+    list_database_backups,
+    list_users,
+    regenerate_user_stream_key,
+    set_user_active,
+    update_restream_settings,
+    update_user_password,
+)
 
 
 logging.basicConfig(
@@ -40,6 +61,22 @@ app = FastAPI(
     version="0.1.0",
 )
 
+CORS_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv(
+        "RESTREAM_CORS_ORIGINS",
+        "http://localhost:3000,https://restream.medialive.ru",
+    ).split(",")
+    if origin.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 SRS_INPUT_URL_TEMPLATE = os.getenv(
     "SRS_INPUT_URL_TEMPLATE",
     "rtmp://localhost/live/{stream_key}",
@@ -52,6 +89,100 @@ active_processes: dict[str, dict[str, Any]] = {}
 active_publishers: dict[str, dict[str, Any]] = {}
 recent_processes: list[dict[str, Any]] = []
 process_lock = threading.Lock()
+
+
+class LoginPayload(BaseModel):
+    username: str
+    password: str
+
+
+class RegisterPayload(BaseModel):
+    username: str
+    password: str
+    email: str = ""
+
+
+class RestreamSettingsPayload(BaseModel):
+    yt_active: bool = False
+    yt_key: str = ""
+    vk_active: bool = False
+    vk_url: str = ""
+    vk_key: str = ""
+    rt_active: bool = False
+    rt_url: str = ""
+    rt_key: str = ""
+    tg_active: bool = False
+    tg_url: str = ""
+    tg_key: str = ""
+    custom_active: bool = False
+    custom_url: str = ""
+    custom_key: str = ""
+
+
+class PasswordChangePayload(BaseModel):
+    current_password: str
+    new_password: str
+
+
+class AdminPasswordPayload(BaseModel):
+    new_password: str
+
+
+class ActivePayload(BaseModel):
+    is_active: bool
+
+
+def public_user(user: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return a user payload safe enough for API responses."""
+
+    if user is None:
+        return None
+    return {key: value for key, value in user.items() if key != "password"}
+
+
+def create_token_response(user: dict[str, Any]) -> dict[str, Any]:
+    """Create API auth response with a persistent session token."""
+
+    token = create_auth_session(int(user["id"]))
+    return {"code": 0, "token": token, "user": public_user(user)}
+
+
+def extract_bearer_token(authorization: str | None) -> str:
+    """Extract a Bearer token from an Authorization header."""
+
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Authorization header is required")
+
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise HTTPException(status_code=401, detail="Bearer token is required")
+    return token.strip()
+
+
+def get_current_api_user(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    """Resolve the current API user from a Bearer session token."""
+
+    token = extract_bearer_token(authorization)
+    user = get_user_by_session_token(token)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired session")
+    return user
+
+
+def get_current_admin(user: dict[str, Any] = Depends(get_current_api_user)) -> dict[str, Any]:
+    """Require an authenticated administrator."""
+
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin role is required")
+    return user
+
+
+def model_to_dict(model: BaseModel) -> dict[str, Any]:
+    """Return model data for both Pydantic v1 and v2."""
+
+    if hasattr(model, "model_dump"):
+        return model.model_dump()
+    return model.dict()
 
 
 def srs_error(message: str, status_code: int = 403) -> JSONResponse:
@@ -483,6 +614,184 @@ def start_ffmpeg(stream_key: str, destinations: list[str]) -> bool:
         daemon=True,
     ).start()
     return True
+
+
+@app.post("/api/auth/login")
+def api_login(payload: LoginPayload) -> dict[str, Any]:
+    """Authenticate a user for the future web frontend."""
+
+    user = authenticate_user(payload.username, payload.password)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Invalid credentials or blocked account")
+    return create_token_response(user)
+
+
+@app.post("/api/auth/register")
+def api_register(payload: RegisterPayload) -> dict[str, Any]:
+    """Register a client user and return an API session token."""
+
+    success, message, user = create_user(payload.username, payload.password, payload.email)
+    if not success or user is None:
+        raise HTTPException(status_code=400, detail=message)
+    return create_token_response(user)
+
+
+@app.post("/api/auth/logout")
+def api_logout(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    """Delete the current API session token."""
+
+    token = extract_bearer_token(authorization)
+    delete_auth_session(token)
+    return {"code": 0, "message": "Logged out"}
+
+
+@app.get("/api/me")
+def api_me(user: dict[str, Any] = Depends(get_current_api_user)) -> dict[str, Any]:
+    """Return the current authenticated user."""
+
+    return {"code": 0, "user": public_user(user)}
+
+
+@app.get("/api/me/settings")
+def api_my_settings(user: dict[str, Any] = Depends(get_current_api_user)) -> dict[str, Any]:
+    """Return current user's restream settings."""
+
+    fresh_user = get_user_by_id(int(user["id"]))
+    return {"code": 0, "user": public_user(fresh_user)}
+
+
+@app.put("/api/me/settings")
+def api_update_my_settings(
+    payload: RestreamSettingsPayload,
+    user: dict[str, Any] = Depends(get_current_api_user),
+) -> dict[str, Any]:
+    """Update current user's restream settings."""
+
+    update_restream_settings(int(user["id"]), model_to_dict(payload))
+    fresh_user = get_user_by_id(int(user["id"]))
+    return {"code": 0, "user": public_user(fresh_user)}
+
+
+@app.post("/api/me/password")
+def api_change_my_password(
+    payload: PasswordChangePayload,
+    user: dict[str, Any] = Depends(get_current_api_user),
+) -> dict[str, Any]:
+    """Change current user's password."""
+
+    success, message = change_user_password(
+        int(user["id"]),
+        payload.current_password,
+        payload.new_password,
+    )
+    if not success:
+        raise HTTPException(status_code=400, detail=message)
+    return {"code": 0, "message": message}
+
+
+@app.post("/api/me/stream-key")
+def api_reset_my_stream_key(user: dict[str, Any] = Depends(get_current_api_user)) -> dict[str, Any]:
+    """Regenerate current user's stream key and stop old active worker."""
+
+    stop_process(user["stream_key"])
+    with process_lock:
+        active_publishers.pop(user["stream_key"], None)
+    success, message, stream_key = regenerate_user_stream_key(int(user["id"]))
+    if not success:
+        raise HTTPException(status_code=400, detail=message)
+    return {"code": 0, "message": message, "stream_key": stream_key}
+
+
+@app.get("/api/me/stream-status")
+def api_my_stream_status(user: dict[str, Any] = Depends(get_current_api_user)) -> dict[str, Any]:
+    """Return current user's stream status."""
+
+    return stream_status_payload(user["stream_key"])
+
+
+@app.get("/api/admin/users")
+def api_admin_users(_admin: dict[str, Any] = Depends(get_current_admin)) -> dict[str, Any]:
+    """Return all users for a future admin frontend."""
+
+    return {"code": 0, "users": list_users()}
+
+
+@app.patch("/api/admin/users/{user_id}/active")
+def api_admin_set_user_active(
+    user_id: int,
+    payload: ActivePayload,
+    _admin: dict[str, Any] = Depends(get_current_admin),
+) -> dict[str, Any]:
+    """Block or unblock a user account."""
+
+    target = get_user_by_id(user_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if not payload.is_active:
+        stop_process(target["stream_key"])
+    set_user_active(user_id, payload.is_active)
+    return {"code": 0, "user": public_user(get_user_by_id(user_id))}
+
+
+@app.post("/api/admin/users/{user_id}/password")
+def api_admin_set_user_password(
+    user_id: int,
+    payload: AdminPasswordPayload,
+    _admin: dict[str, Any] = Depends(get_current_admin),
+) -> dict[str, Any]:
+    """Reset a user password as admin."""
+
+    success, message = update_user_password(user_id, payload.new_password)
+    if not success:
+        raise HTTPException(status_code=400, detail=message)
+    return {"code": 0, "message": message}
+
+
+@app.post("/api/admin/users/{user_id}/stream-key")
+def api_admin_reset_stream_key(
+    user_id: int,
+    _admin: dict[str, Any] = Depends(get_current_admin),
+) -> dict[str, Any]:
+    """Regenerate a user's stream key as admin."""
+
+    target = get_user_by_id(user_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    stop_process(target["stream_key"])
+    with process_lock:
+        active_publishers.pop(target["stream_key"], None)
+    success, message, stream_key = regenerate_user_stream_key(user_id)
+    if not success:
+        raise HTTPException(status_code=400, detail=message)
+    return {"code": 0, "message": message, "stream_key": stream_key}
+
+
+@app.get("/api/admin/streams")
+def api_admin_streams(_admin: dict[str, Any] = Depends(get_current_admin)) -> dict[str, Any]:
+    """Return active publishers, FFmpeg workers, and recent exits."""
+
+    return active_streams()
+
+
+@app.get("/api/admin/system-metrics")
+def api_admin_system_metrics(_admin: dict[str, Any] = Depends(get_current_admin)) -> dict[str, Any]:
+    """Return server metrics for a future admin frontend."""
+
+    return system_metrics_payload()
+
+
+@app.get("/api/admin/backups")
+def api_admin_backups(_admin: dict[str, Any] = Depends(get_current_admin)) -> dict[str, Any]:
+    """Return recent SQLite backups."""
+
+    return {"code": 0, "backups": list_database_backups()}
+
+
+@app.post("/api/admin/backups")
+def api_admin_create_backup(_admin: dict[str, Any] = Depends(get_current_admin)) -> dict[str, Any]:
+    """Create a SQLite backup."""
+
+    return {"code": 0, "backup": create_database_backup()}
 
 
 @app.get("/health")
