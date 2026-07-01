@@ -1,5 +1,35 @@
 # restream1
 
+## Next.js frontend migration
+
+The repository now includes an experimental Next.js client frontend in
+`frontend/`. It uses the new FastAPI REST API under `/api/...` and can run in
+parallel with the existing Streamlit panel.
+
+Local development:
+
+```bash
+cd frontend
+npm install
+NEXT_PUBLIC_API_BASE_URL=http://localhost:8000 npm run dev
+```
+
+Production build:
+
+```bash
+cd frontend
+npm run build
+npm run start
+```
+
+Useful environment variables:
+
+```bash
+NEXT_PUBLIC_API_BASE_URL=https://restream.medialive.ru
+NEXT_PUBLIC_OBS_SERVER_URL=rtmp://restream.medialive.ru/live
+NEXT_PUBLIC_HLS_BASE_URL=https://restream.medialive.ru/srs/live
+```
+
 ## HLS preview in the Streamlit cabinet
 
 The client dashboard renders a browser preview through HLS. Browsers cannot play
