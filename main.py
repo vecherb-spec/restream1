@@ -12,8 +12,11 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 import threading
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -39,8 +42,10 @@ SRS_INPUT_URL_TEMPLATE = os.getenv(
     "rtmp://localhost/live/{stream_key}",
 )
 FFMPEG_BIN = os.getenv("FFMPEG_BIN", "ffmpeg")
+LOG_DIR = Path(os.getenv("RESTREAM_LOG_DIR", "logs"))
 
-active_processes: dict[str, subprocess.Popen[Any]] = {}
+active_processes: dict[str, dict[str, Any]] = {}
+recent_processes: list[dict[str, Any]] = []
 process_lock = threading.Lock()
 
 
@@ -77,6 +82,61 @@ def extract_stream_key(payload: dict[str, Any]) -> str:
     return raw_stream.rsplit("/", 1)[-1]
 
 
+def utc_now_iso() -> str:
+    """Return a compact UTC timestamp for API responses."""
+
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def safe_log_name(stream_key: str) -> str:
+    """Create a filesystem-safe log filename from a stream key."""
+
+    safe_key = re.sub(r"[^A-Za-z0-9_.-]+", "_", stream_key).strip("._")
+    return safe_key or "stream"
+
+
+def log_path_for_stream(stream_key: str) -> Path:
+    """Return the FFmpeg log path for a stream."""
+
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    return LOG_DIR / f"ffmpeg_{safe_log_name(stream_key)}_{timestamp}.log"
+
+
+def tail_log_file(log_path: str | Path | None, lines: int = 80) -> list[str]:
+    """Read the last N lines of a FFmpeg log file."""
+
+    if not log_path:
+        return []
+
+    path = Path(log_path)
+    if not path.exists() or not path.is_file():
+        return []
+
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        logger.exception("Failed to read FFmpeg log file %s", path)
+        return []
+    return content[-max(1, min(lines, 500)) :]
+
+
+def process_snapshot(stream_key: str, entry: dict[str, Any]) -> dict[str, Any]:
+    """Serialize a process entry for the admin API."""
+
+    process: subprocess.Popen[Any] = entry["process"]
+    return_code = process.poll()
+    return {
+        "stream_key": stream_key,
+        "pid": process.pid,
+        "status": "running" if return_code is None else "exited",
+        "return_code": return_code,
+        "started_at": entry.get("started_at"),
+        "destinations": entry.get("destinations", 0),
+        "log_path": str(entry.get("log_path") or ""),
+    }
+
+
 def build_ffmpeg_command(stream_key: str, destinations: list[str]) -> list[str]:
     """Build one FFmpeg command that fans out the input to all enabled outputs."""
 
@@ -100,11 +160,12 @@ def stop_process(stream_key: str) -> bool:
     """Terminate a running FFmpeg worker for a stream key."""
 
     with process_lock:
-        process = active_processes.pop(stream_key, None)
+        entry = active_processes.pop(stream_key, None)
 
-    if process is None:
+    if entry is None:
         return False
 
+    process: subprocess.Popen[Any] = entry["process"]
     if process.poll() is not None:
         logger.info("FFmpeg for %s already exited with code %s", stream_key, process.returncode)
         return True
@@ -117,6 +178,13 @@ def stop_process(stream_key: str) -> bool:
         logger.warning("FFmpeg for %s did not stop gracefully; killing it", stream_key)
         process.kill()
         process.wait(timeout=5)
+
+    snapshot = process_snapshot(stream_key, entry)
+    snapshot["ended_at"] = utc_now_iso()
+    snapshot["stopped_by"] = "admin_or_webhook"
+    with process_lock:
+        recent_processes.insert(0, snapshot)
+        del recent_processes[50:]
     return True
 
 
@@ -125,8 +193,12 @@ def monitor_process(stream_key: str, process: subprocess.Popen[Any]) -> None:
 
     return_code = process.wait()
     with process_lock:
-        current_process = active_processes.get(stream_key)
-        if current_process is process:
+        current_entry = active_processes.get(stream_key)
+        if current_entry and current_entry.get("process") is process:
+            snapshot = process_snapshot(stream_key, current_entry)
+            snapshot["ended_at"] = utc_now_iso()
+            recent_processes.insert(0, snapshot)
+            del recent_processes[50:]
             active_processes.pop(stream_key, None)
 
     if return_code == 0:
@@ -152,14 +224,24 @@ def start_ffmpeg(stream_key: str, destinations: list[str]) -> bool:
             redacted_command[index] = "[RTMP_OUTPUT_REDACTED]"
     logger.info("Starting FFmpeg for %s: %s", stream_key, " ".join(redacted_command))
 
-    process = subprocess.Popen(
-        command,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    log_path = log_path_for_stream(stream_key)
+    with log_path.open("ab") as log_file:
+        log_file.write(f"[{utc_now_iso()}] Starting: {' '.join(redacted_command)}\n".encode("utf-8"))
+        log_file.flush()
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=log_file,
+        )
+
     with process_lock:
-        active_processes[stream_key] = process
+        active_processes[stream_key] = {
+            "process": process,
+            "started_at": utc_now_iso(),
+            "destinations": len(destinations),
+            "log_path": log_path,
+        }
 
     threading.Thread(
         target=monitor_process,
@@ -184,12 +266,43 @@ def active_streams() -> dict[str, Any]:
     """Expose active stream keys for the Streamlit admin panel."""
 
     with process_lock:
-        streams = [
-            {"stream_key": key, "pid": process.pid}
-            for key, process in active_processes.items()
-            if process.poll() is None
-        ]
-    return {"code": 0, "streams": streams}
+        streams = [process_snapshot(key, entry) for key, entry in active_processes.items()]
+        recent = recent_processes[:20]
+    return {"code": 0, "streams": streams, "recent": recent}
+
+
+@app.get("/stream_logs/{stream_key}")
+def stream_logs(stream_key: str, lines: int = 80) -> dict[str, Any]:
+    """Return the latest FFmpeg log lines for an active stream."""
+
+    with process_lock:
+        entry = active_processes.get(stream_key)
+        recent_entry = next(
+            (item for item in recent_processes if item.get("stream_key") == stream_key),
+            None,
+        )
+
+    log_path = entry.get("log_path") if entry else None
+    if log_path is None and recent_entry:
+        log_path = recent_entry.get("log_path")
+
+    if log_path is None:
+        return {"code": 1, "message": "stream log was not found", "lines": []}
+
+    return {
+        "code": 0,
+        "stream_key": stream_key,
+        "log_path": str(log_path or ""),
+        "lines": tail_log_file(log_path, lines=lines),
+    }
+
+
+@app.post("/stop_stream/{stream_key}")
+def stop_stream(stream_key: str) -> dict[str, Any]:
+    """Allow the admin panel to stop a FFmpeg worker without waiting for SRS."""
+
+    stopped = stop_process(stream_key)
+    return {"code": 0, "stream_key": stream_key, "stopped": stopped}
 
 
 @app.post("/on_publish")

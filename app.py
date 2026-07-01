@@ -24,6 +24,7 @@ from database import (
     init_db,
     list_users,
     set_user_active,
+    update_user_password,
     update_restream_settings,
 )
 
@@ -231,6 +232,59 @@ def fetch_active_streams() -> tuple[list[dict[str, Any]], str | None]:
         return [], "Backend вернул некорректный JSON."
 
 
+def fetch_stream_activity() -> tuple[dict[str, list[dict[str, Any]]], str | None]:
+    """Load active and recent stream process data from FastAPI."""
+
+    try:
+        response = requests.get(f"{BACKEND_URL}/active_streams", timeout=3)
+        response.raise_for_status()
+        data = response.json()
+        return {
+            "streams": data.get("streams", []),
+            "recent": data.get("recent", []),
+        }, None
+    except requests.RequestException as exc:
+        return {"streams": [], "recent": []}, f"Не удалось получить эфиры: {exc}"
+    except ValueError:
+        return {"streams": [], "recent": []}, "Backend вернул некорректный JSON."
+
+
+def stop_remote_stream(stream_key: str) -> tuple[bool, str]:
+    """Ask FastAPI to stop an active FFmpeg worker."""
+
+    try:
+        response = requests.post(f"{BACKEND_URL}/stop_stream/{stream_key}", timeout=5)
+        response.raise_for_status()
+        data = response.json()
+        if data.get("stopped"):
+            return True, "Эфир остановлен."
+        return False, "Активный процесс для этого ключа не найден."
+    except requests.RequestException as exc:
+        return False, f"Не удалось остановить эфир: {exc}"
+    except ValueError:
+        return False, "Backend вернул некорректный JSON."
+
+
+def fetch_stream_logs(stream_key: str, lines: int = 80) -> tuple[list[str], str | None]:
+    """Load latest FFmpeg log lines for a stream."""
+
+    try:
+        response = requests.get(
+            f"{BACKEND_URL}/stream_logs/{stream_key}",
+            params={"lines": lines},
+            timeout=5,
+        )
+        response.raise_for_status()
+        data = response.json()
+        if data.get("code") != 0:
+            return [], data.get("message", "Лог не найден.")
+        return data.get("lines", []), None
+    except requests.RequestException as exc:
+        return [], f"Не удалось получить лог: {exc}"
+    except ValueError:
+        return [], "Backend вернул некорректный JSON."
+
+
 def render_admin_dashboard() -> None:
     """Render administrator dashboard."""
 
@@ -257,6 +311,10 @@ def render_admin_dashboard() -> None:
                 "Rutube": bool_value(item["rt_active"]),
                 "Telegram": bool_value(item["tg_active"]),
                 "Custom": bool_value(item["custom_active"]),
+                "Включено площадок": sum(
+                    bool_value(item[field])
+                    for field in ("yt_active", "vk_active", "rt_active", "tg_active", "custom_active")
+                ),
                 "Создан": item["created_at"],
             }
             for item in users
@@ -265,7 +323,7 @@ def render_admin_dashboard() -> None:
         hide_index=True,
     )
 
-    st.subheader("Блокировка пользователей")
+    st.subheader("Управление пользователем")
     client_options = {
         f"{item['id']} — {item['username']} ({'active' if item['is_active'] else 'blocked'})": item
         for item in users
@@ -276,8 +334,13 @@ def render_admin_dashboard() -> None:
     col_block, col_unblock = st.columns(2)
     with col_block:
         if st.button("Заблокировать", disabled=not bool_value(selected_user["is_active"])):
+            stopped, stop_message = stop_remote_stream(selected_user["stream_key"])
             set_user_active(int(selected_user["id"]), False)
-            st.success("Пользователь заблокирован.")
+            if stopped:
+                st.success(f"Пользователь заблокирован. {stop_message}")
+            else:
+                st.success("Пользователь заблокирован.")
+                st.caption(stop_message)
             st.rerun()
     with col_unblock:
         if st.button("Разблокировать", disabled=bool_value(selected_user["is_active"])):
@@ -285,15 +348,66 @@ def render_admin_dashboard() -> None:
             st.success("Пользователь разблокирован.")
             st.rerun()
 
+    with st.form("admin_password_form"):
+        st.write("Смена пароля выбранного пользователя")
+        new_password = st.text_input("Новый пароль", type="password")
+        new_password_repeat = st.text_input("Повторите новый пароль", type="password")
+        password_submitted = st.form_submit_button("Обновить пароль")
+
+    if password_submitted:
+        if new_password != new_password_repeat:
+            st.error("Пароли не совпадают.")
+        else:
+            success, message = update_user_password(int(selected_user["id"]), new_password)
+            if success:
+                st.success(message)
+            else:
+                st.error(message)
+
     st.subheader("Активные эфиры")
-    active_streams, error = fetch_active_streams()
+    activity, error = fetch_stream_activity()
+    active_streams = activity["streams"]
+    recent_streams = activity["recent"]
     if error:
         st.warning(error)
         st.caption(f"Проверьте, что FastAPI backend запущен по адресу {BACKEND_URL}.")
     elif active_streams:
-        st.table(active_streams)
+        st.dataframe(active_streams, use_container_width=True, hide_index=True)
+        for stream in active_streams:
+            stream_key = stream["stream_key"]
+            with st.expander(f"{stream_key} — PID {stream.get('pid')}"):
+                col_stop, col_log = st.columns([1, 3])
+                with col_stop:
+                    if st.button("Остановить эфир", key=f"stop_{stream_key}"):
+                        success, message = stop_remote_stream(stream_key)
+                        if success:
+                            st.success(message)
+                            st.rerun()
+                        else:
+                            st.warning(message)
+                with col_log:
+                    log_lines, log_error = fetch_stream_logs(stream_key)
+                    if log_error:
+                        st.caption(log_error)
+                    else:
+                        st.code("\n".join(log_lines[-80:]) or "Лог пока пуст.", language="text")
     else:
         st.info("Сейчас нет активных FFmpeg-процессов.")
+
+    st.subheader("Недавние завершения FFmpeg")
+    if recent_streams:
+        st.dataframe(recent_streams, use_container_width=True, hide_index=True)
+        selected_recent = st.selectbox(
+            "Посмотреть лог завершенного эфира",
+            [item["stream_key"] for item in recent_streams],
+        )
+        log_lines, log_error = fetch_stream_logs(selected_recent)
+        if log_error:
+            st.caption(log_error)
+        else:
+            st.code("\n".join(log_lines[-80:]) or "Лог пуст.", language="text")
+    else:
+        st.caption("Пока нет завершенных FFmpeg-процессов.")
 
     st.divider()
     if st.button("Выйти из аккаунта"):

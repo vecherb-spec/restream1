@@ -240,6 +240,40 @@ def set_user_active(user_id: int, is_active: bool) -> None:
         )
 
 
+def update_user_password(user_id: int, new_password: str) -> tuple[bool, str]:
+    """Set a new password hash for a user."""
+
+    if len(new_password) < 8:
+        return False, "Пароль должен быть не короче 8 символов."
+
+    with get_connection() as connection:
+        cursor = connection.execute(
+            "UPDATE users SET password = ? WHERE id = ?",
+            (hash_password(new_password), user_id),
+        )
+
+    if cursor.rowcount == 0:
+        return False, "Пользователь не найден."
+    return True, "Пароль обновлен."
+
+
+def get_enabled_platform_names(user: dict[str, Any]) -> list[str]:
+    """Return human-readable names of enabled destination platforms."""
+
+    platforms: list[str] = []
+    if user.get("yt_active") and user.get("yt_key"):
+        platforms.append("YouTube")
+    if user.get("vk_active") and user.get("vk_url") and user.get("vk_key"):
+        platforms.append("VK")
+    if user.get("rt_active") and user.get("rt_url") and user.get("rt_key"):
+        platforms.append("Rutube")
+    if user.get("tg_active") and user.get("tg_url") and user.get("tg_key"):
+        platforms.append("Telegram")
+    if user.get("custom_active") and user.get("custom_url") and user.get("custom_key"):
+        platforms.append("Custom")
+    return platforms
+
+
 def update_restream_settings(user_id: int, settings: dict[str, Any]) -> None:
     """Update destination settings for a client account."""
 
