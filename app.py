@@ -48,7 +48,7 @@ PREVIEW_HLS_BASE_URL = os.getenv(
     "https://restream.medialive.ru/srs/live",
 ).rstrip("/")
 PREVIEW_HLS_URL_TEMPLATE = os.getenv("RESTREAM_PREVIEW_HLS_URL_TEMPLATE", "").strip()
-STREAM_STATUS_REFRESH_SECONDS = int(os.getenv("RESTREAM_STREAM_STATUS_REFRESH_SECONDS", "5"))
+STREAM_STATUS_REFRESH_SECONDS = int(os.getenv("RESTREAM_STREAM_STATUS_REFRESH_SECONDS", "1"))
 
 
 def public_user(user: dict[str, Any]) -> dict[str, Any]:
@@ -171,20 +171,13 @@ def status_lamp(color: str) -> str:
     }.get(color, "⚪")
 
 
-def render_page_autorefresh(seconds: int) -> None:
-    """Reload the Streamlit page periodically for near real-time status."""
+def streamlit_fragment(function):
+    """Apply st.fragment when available while keeping older Streamlit usable."""
 
-    milliseconds = max(2, seconds) * 1000
-    components.html(
-        f"""
-        <script>
-          window.setTimeout(function () {{
-            window.parent.location.reload();
-          }}, {milliseconds});
-        </script>
-        """,
-        height=0,
-    )
+    fragment = getattr(st, "fragment", None)
+    if fragment is None:
+        return function
+    return fragment(run_every=f"{STREAM_STATUS_REFRESH_SECONDS}s")(function)
 
 
 def is_valid_rtmp_url(value: str) -> bool:
@@ -343,6 +336,7 @@ def render_hls_preview(stream_key: str) -> None:
     st.caption(f"HLS preview URL: `{preview_url}`")
 
 
+@streamlit_fragment
 def render_client_stream_status(stream_key: str) -> None:
     """Render red/yellow/green stream health status for the client."""
 
@@ -358,14 +352,7 @@ def render_client_stream_status(stream_key: str) -> None:
         f"### {status_lamp(status.get('color', 'red'))} {status.get('label', 'Статус неизвестен')}"
     )
     st.caption(status.get("message", ""))
-
-    auto_refresh = st.checkbox(
-        f"Автообновление каждые {STREAM_STATUS_REFRESH_SECONDS} сек.",
-        value=True,
-        key="stream_status_autorefresh",
-    )
-    if auto_refresh:
-        render_page_autorefresh(STREAM_STATUS_REFRESH_SECONDS)
+    st.caption(f"Статус обновляется автоматически каждые {STREAM_STATUS_REFRESH_SECONDS} сек.")
 
     col_bitrate, col_fps, col_resolution, col_destinations = st.columns(4)
     col_bitrate.metric("Bitrate", status.get("bitrate") or "-")
@@ -376,8 +363,6 @@ def render_client_stream_status(stream_key: str) -> None:
 
     published_at = (status.get("publisher") or {}).get("published_at", "-")
     st.caption(f"Publish time: `{published_at}`")
-    if st.button("Обновить статус потока"):
-        st.rerun()
 
 
 def render_auth_page() -> None:
