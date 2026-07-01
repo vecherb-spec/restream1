@@ -13,6 +13,7 @@ from __future__ import annotations
 import html
 import json
 import os
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -20,14 +21,18 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from database import (
+    DATABASE_PATH,
     YOUTUBE_RTMP_URL,
     authenticate_user,
+    change_user_password,
     create_auth_session,
+    create_database_backup,
     create_user,
     delete_auth_session,
     get_user_by_session_token,
     get_user_by_id,
     init_db,
+    list_database_backups,
     list_users,
     regenerate_user_stream_key,
     set_user_active,
@@ -140,6 +145,29 @@ def bool_value(value: Any) -> bool:
     """Convert SQLite 0/1 values to booleans for Streamlit widgets."""
 
     return bool(int(value or 0))
+
+
+def format_bytes(value: int | float | None) -> str:
+    """Format bytes as a compact human-readable value."""
+
+    if value is None:
+        return "-"
+    size = float(value)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} B"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
+def status_lamp(color: str) -> str:
+    """Return an emoji lamp for stream status colors."""
+
+    return {
+        "green": "🟢",
+        "yellow": "🟡",
+        "red": "🔴",
+    }.get(color, "⚪")
 
 
 def is_valid_rtmp_url(value: str) -> bool:
@@ -298,6 +326,36 @@ def render_hls_preview(stream_key: str) -> None:
     st.caption(f"HLS preview URL: `{preview_url}`")
 
 
+def render_client_stream_status(stream_key: str) -> None:
+    """Render red/yellow/green stream health status for the client."""
+
+    status, error = fetch_stream_status(stream_key)
+    if error:
+        st.warning(error)
+        return
+    if not status:
+        st.warning("Статус потока недоступен.")
+        return
+
+    st.markdown(
+        f"### {status_lamp(status.get('color', 'red'))} {status.get('label', 'Статус неизвестен')}"
+    )
+    st.caption(status.get("message", ""))
+
+    col_frame, col_fps, col_speed, col_destinations = st.columns(4)
+    col_frame.metric("Кадров FFmpeg", int(status.get("frame") or 0))
+    fps = status.get("fps")
+    col_fps.metric("FPS", "-" if fps is None else f"{float(fps):.1f}")
+    col_speed.metric("Speed", status.get("speed") or "-")
+    col_destinations.metric("Площадок", int(status.get("destinations") or 0))
+
+    bitrate = status.get("bitrate") or "-"
+    published_at = (status.get("publisher") or {}).get("published_at", "-")
+    st.caption(f"Bitrate: `{bitrate}` | Publish time: `{published_at}`")
+    if st.button("Обновить статус потока"):
+        st.rerun()
+
+
 def render_auth_page() -> None:
     """Render login and open registration page."""
 
@@ -325,9 +383,7 @@ def render_auth_page() -> None:
                 st.success("Вход выполнен.")
                 st.rerun()
 
-        with st.expander("Данные администратора по умолчанию"):
-            st.write("Логин: `admin`")
-            st.write("Пароль: `admin_password_2026`")
+        st.caption("Если забыли пароль администратора, сбросьте его через SQLite или серверную консоль.")
 
     else:
         with st.form("register_form"):
@@ -401,6 +457,9 @@ def render_client_dashboard() -> None:
         "FFmpeg будет запущен автоматически после webhook `/on_publish` от SRS."
     )
 
+    st.subheader("Состояние потока")
+    render_client_stream_status(user["stream_key"])
+
     st.subheader("Превью вашего потока")
     st.caption(
         "Превью работает через HLS и обычно отстает от OBS на 10-30 секунд. "
@@ -409,6 +468,27 @@ def render_client_dashboard() -> None:
     render_hls_preview(user["stream_key"])
 
     render_obs_instructions(user)
+
+    with st.expander("Сменить пароль", expanded=False):
+        with st.form("client_change_password_form"):
+            current_password = st.text_input("Текущий пароль", type="password")
+            new_password = st.text_input("Новый пароль", type="password")
+            new_password_repeat = st.text_input("Повторите новый пароль", type="password")
+            password_submitted = st.form_submit_button("Обновить мой пароль")
+
+        if password_submitted:
+            if new_password != new_password_repeat:
+                st.error("Пароли не совпадают.")
+            else:
+                success, message = change_user_password(
+                    int(user["id"]),
+                    current_password,
+                    new_password,
+                )
+                if success:
+                    st.success(message)
+                else:
+                    st.error(message)
 
     with st.expander("Безопасность stream key", expanded=False):
         st.warning(
@@ -489,6 +569,32 @@ def fetch_active_streams() -> tuple[list[dict[str, Any]], str | None]:
         return [], "Backend вернул некорректный JSON."
 
 
+def fetch_stream_status(stream_key: str) -> tuple[dict[str, Any] | None, str | None]:
+    """Load one stream status from FastAPI."""
+
+    try:
+        response = requests.get(f"{BACKEND_URL}/stream_status/{stream_key}", timeout=3)
+        response.raise_for_status()
+        return response.json(), None
+    except requests.RequestException as exc:
+        return None, f"Не удалось получить статус потока: {exc}"
+    except ValueError:
+        return None, "Backend вернул некорректный JSON."
+
+
+def fetch_system_metrics() -> tuple[dict[str, Any] | None, str | None]:
+    """Load server metrics from FastAPI."""
+
+    try:
+        response = requests.get(f"{BACKEND_URL}/system_metrics", timeout=3)
+        response.raise_for_status()
+        return response.json(), None
+    except requests.RequestException as exc:
+        return None, f"Не удалось получить мониторинг сервера: {exc}"
+    except ValueError:
+        return None, "Backend вернул некорректный JSON."
+
+
 def fetch_stream_activity() -> tuple[dict[str, list[dict[str, Any]]], str | None]:
     """Load active and recent stream process data from FastAPI."""
 
@@ -498,12 +604,13 @@ def fetch_stream_activity() -> tuple[dict[str, list[dict[str, Any]]], str | None
         data = response.json()
         return {
             "streams": data.get("streams", []),
+            "publishers": data.get("publishers", []),
             "recent": data.get("recent", []),
         }, None
     except requests.RequestException as exc:
-        return {"streams": [], "recent": []}, f"Не удалось получить эфиры: {exc}"
+        return {"streams": [], "publishers": [], "recent": []}, f"Не удалось получить эфиры: {exc}"
     except ValueError:
-        return {"streams": [], "recent": []}, "Backend вернул некорректный JSON."
+        return {"streams": [], "publishers": [], "recent": []}, "Backend вернул некорректный JSON."
 
 
 def stop_remote_stream(stream_key: str) -> tuple[bool, str]:
@@ -542,6 +649,80 @@ def fetch_stream_logs(stream_key: str, lines: int = 80) -> tuple[list[str], str 
         return [], "Backend вернул некорректный JSON."
 
 
+def render_admin_system_monitoring() -> None:
+    """Render server health metrics for the administrator."""
+
+    st.subheader("Мониторинг сервера")
+    metrics, error = fetch_system_metrics()
+    if error:
+        st.warning(error)
+        return
+    if not metrics:
+        st.warning("Метрики сервера недоступны.")
+        return
+
+    cpu = metrics.get("cpu", {})
+    memory = metrics.get("memory", {})
+    disk = metrics.get("disk", {})
+    processes = metrics.get("processes", {})
+    services = metrics.get("services", {})
+
+    col_cpu, col_ram, col_disk, col_ffmpeg = st.columns(4)
+    col_cpu.metric(
+        "CPU load/core",
+        cpu.get("load_1_per_core", "-"),
+        help=f"Load average: {cpu.get('load_1')} / {cpu.get('load_5')} / {cpu.get('load_15')}",
+    )
+    col_ram.metric("RAM used", f"{memory.get('used_percent', 0)}%")
+    col_disk.metric("Disk used", f"{disk.get('used_percent', 0)}%")
+    col_ffmpeg.metric("FFmpeg", int(processes.get("ffmpeg_active") or 0))
+
+    st.caption(
+        f"RAM: {format_bytes(memory.get('used_bytes'))} / {format_bytes(memory.get('total_bytes'))} | "
+        f"Disk: {format_bytes(disk.get('used_bytes'))} / {format_bytes(disk.get('total_bytes'))}"
+    )
+
+    service_cols = st.columns(3)
+    service_cols[0].metric("API", "OK" if services.get("api") else "FAIL")
+    service_cols[1].metric("SRS RTMP :1935", "OK" if services.get("srs_rtmp_1935") else "FAIL")
+    service_cols[2].metric("SRS HLS :8080", "OK" if services.get("srs_hls_8080") else "FAIL")
+
+    if st.button("Обновить мониторинг"):
+        st.rerun()
+
+
+def render_admin_backup_tools() -> None:
+    """Render SQLite backup controls."""
+
+    st.subheader("Backup SQLite")
+    col_create, col_download = st.columns(2)
+    with col_create:
+        if st.button("Создать backup сейчас"):
+            try:
+                backup = create_database_backup()
+                st.success(f"Backup создан: {backup['filename']} ({format_bytes(backup['size_bytes'])})")
+            except OSError as exc:
+                st.error(f"Не удалось создать backup: {exc}")
+
+    with col_download:
+        db_path = Path(DATABASE_PATH)
+        if db_path.exists():
+            st.download_button(
+                "Скачать текущую базу",
+                data=db_path.read_bytes(),
+                file_name=db_path.name,
+                mime="application/octet-stream",
+            )
+        else:
+            st.caption("Файл базы пока не найден.")
+
+    backups = list_database_backups()
+    if backups:
+        st.dataframe(backups, use_container_width=True, hide_index=True)
+    else:
+        st.caption("Backup-копий пока нет.")
+
+
 def render_admin_dashboard() -> None:
     """Render administrator dashboard."""
 
@@ -551,6 +732,9 @@ def render_admin_dashboard() -> None:
 
     st.title("Админка Restream")
     st.write(f"Вы вошли как **{user['username']}**.")
+
+    render_admin_system_monitoring()
+    render_admin_backup_tools()
 
     st.subheader("Пользователи")
     users = list_users()
@@ -648,11 +832,18 @@ def render_admin_dashboard() -> None:
     st.subheader("Активные эфиры")
     activity, error = fetch_stream_activity()
     active_streams = activity["streams"]
+    active_publishers = activity["publishers"]
     recent_streams = activity["recent"]
     if error:
         st.warning(error)
         st.caption(f"Проверьте, что FastAPI backend запущен по адресу {BACKEND_URL}.")
-    elif active_streams:
+    elif active_publishers or active_streams:
+        if active_publishers:
+            st.write("Входящие потоки SRS")
+            st.dataframe(active_publishers, use_container_width=True, hide_index=True)
+        if not active_streams:
+            st.info("Входящие потоки есть, но активных FFmpeg-процессов нет.")
+    if active_streams:
         st.dataframe(active_streams, use_container_width=True, hide_index=True)
         for stream in active_streams:
             stream_key = stream["stream_key"]
@@ -672,7 +863,7 @@ def render_admin_dashboard() -> None:
                         st.caption(log_error)
                     else:
                         st.code("\n".join(log_lines[-80:]) or "Лог пока пуст.", language="text")
-    else:
+    elif not error and not active_publishers:
         st.info("Сейчас нет активных FFmpeg-процессов.")
 
     st.subheader("Недавние завершения FFmpeg")

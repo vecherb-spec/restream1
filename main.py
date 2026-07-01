@@ -13,6 +13,8 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
+import socket
 import subprocess
 import threading
 from datetime import datetime, timezone
@@ -22,7 +24,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from database import get_active_user_by_stream_key, get_enabled_destinations
+from database import DATABASE_PATH, get_active_user_by_stream_key, get_enabled_destinations
 
 
 logging.basicConfig(
@@ -45,6 +47,7 @@ FFMPEG_BIN = os.getenv("FFMPEG_BIN", "ffmpeg")
 LOG_DIR = Path(os.getenv("RESTREAM_LOG_DIR", "logs"))
 
 active_processes: dict[str, dict[str, Any]] = {}
+active_publishers: dict[str, dict[str, Any]] = {}
 recent_processes: list[dict[str, Any]] = []
 process_lock = threading.Lock()
 
@@ -121,11 +124,49 @@ def tail_log_file(log_path: str | Path | None, lines: int = 80) -> list[str]:
     return content[-max(1, min(lines, 500)) :]
 
 
+def parse_ffmpeg_progress(log_path: str | Path | None) -> dict[str, Any]:
+    """Parse the latest FFmpeg -progress key/value block from a log file."""
+
+    metrics: dict[str, Any] = {
+        "frame": 0,
+        "fps": None,
+        "bitrate": "",
+        "speed": "",
+        "out_time_ms": None,
+        "progress": "",
+    }
+    for line in tail_log_file(log_path, lines=500):
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if key == "frame":
+            try:
+                metrics["frame"] = int(value)
+            except ValueError:
+                metrics["frame"] = 0
+        elif key == "fps":
+            try:
+                metrics["fps"] = float(value)
+            except ValueError:
+                metrics["fps"] = None
+        elif key in {"bitrate", "speed", "progress"}:
+            metrics[key] = value
+        elif key == "out_time_ms":
+            try:
+                metrics["out_time_ms"] = int(value)
+            except ValueError:
+                metrics["out_time_ms"] = None
+    return metrics
+
+
 def process_snapshot(stream_key: str, entry: dict[str, Any]) -> dict[str, Any]:
     """Serialize a process entry for the admin API."""
 
     process: subprocess.Popen[Any] = entry["process"]
     return_code = process.poll()
+    progress = parse_ffmpeg_progress(entry.get("log_path"))
     return {
         "stream_key": stream_key,
         "pid": process.pid,
@@ -134,6 +175,138 @@ def process_snapshot(stream_key: str, entry: dict[str, Any]) -> dict[str, Any]:
         "started_at": entry.get("started_at"),
         "destinations": entry.get("destinations", 0),
         "log_path": str(entry.get("log_path") or ""),
+        "frame": progress["frame"],
+        "fps": progress["fps"],
+        "bitrate": progress["bitrate"],
+        "speed": progress["speed"],
+        "progress": progress["progress"],
+    }
+
+
+def stream_status_payload(stream_key: str) -> dict[str, Any]:
+    """Build the client-facing stream status payload."""
+
+    with process_lock:
+        publisher = active_publishers.get(stream_key)
+        process_entry = active_processes.get(stream_key)
+        recent_entry = next(
+            (item for item in recent_processes if item.get("stream_key") == stream_key),
+            None,
+        )
+
+    process = process_snapshot(stream_key, process_entry) if process_entry else None
+    recent = recent_entry if recent_entry else None
+    destinations = 0
+    if publisher:
+        destinations = int(publisher.get("destinations") or 0)
+    elif process:
+        destinations = int(process.get("destinations") or 0)
+
+    frame = int(process.get("frame") or 0) if process else 0
+    if not publisher:
+        color = "red"
+        label = "Нет входящего потока"
+        message = "OBS не публикует поток в SRS или SRS еще не прислал on_publish."
+    elif destinations == 0:
+        color = "yellow"
+        label = "Поток в SRS, рестрим не запущен"
+        message = "Входящий поток есть, но активные площадки не настроены."
+    elif process and process.get("status") == "running":
+        color = "green" if frame > 0 else "yellow"
+        label = "Рестрим работает" if frame > 0 else "FFmpeg запущен, ждем кадры"
+        message = "FFmpeg отправляет поток на активные площадки."
+    else:
+        color = "yellow"
+        label = "Поток есть, FFmpeg не работает"
+        message = "Проверьте FFmpeg-лог и настройки площадок."
+
+    return {
+        "code": 0,
+        "stream_key": stream_key,
+        "color": color,
+        "label": label,
+        "message": message,
+        "publisher": publisher,
+        "process": process,
+        "recent": recent,
+        "frame": frame,
+        "fps": process.get("fps") if process else None,
+        "bitrate": process.get("bitrate") if process else "",
+        "speed": process.get("speed") if process else "",
+        "destinations": destinations,
+    }
+
+
+def read_memory_metrics() -> dict[str, Any]:
+    """Read Linux memory metrics from /proc/meminfo."""
+
+    values: dict[str, int] = {}
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            key, raw_value = line.split(":", 1)
+            values[key] = int(raw_value.strip().split()[0]) * 1024
+    except (OSError, ValueError):
+        return {}
+
+    total = values.get("MemTotal", 0)
+    available = values.get("MemAvailable", 0)
+    used = max(total - available, 0)
+    used_percent = round((used / total) * 100, 1) if total else 0
+    return {
+        "total_bytes": total,
+        "available_bytes": available,
+        "used_bytes": used,
+        "used_percent": used_percent,
+    }
+
+
+def check_tcp_port(host: str, port: int, timeout: float = 0.5) -> bool:
+    """Return True if a TCP port accepts connections."""
+
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def system_metrics_payload() -> dict[str, Any]:
+    """Collect lightweight server metrics without extra dependencies."""
+
+    load_1, load_5, load_15 = os.getloadavg()
+    cpu_count = os.cpu_count() or 1
+    disk = shutil.disk_usage(DATABASE_PATH.parent)
+    with process_lock:
+        ffmpeg_count = len(active_processes)
+        publisher_count = len(active_publishers)
+
+    return {
+        "code": 0,
+        "timestamp": utc_now_iso(),
+        "cpu": {
+            "cores": cpu_count,
+            "load_1": round(load_1, 2),
+            "load_5": round(load_5, 2),
+            "load_15": round(load_15, 2),
+            "load_1_per_core": round(load_1 / cpu_count, 2),
+        },
+        "memory": read_memory_metrics(),
+        "disk": {
+            "path": str(DATABASE_PATH.parent),
+            "total_bytes": disk.total,
+            "used_bytes": disk.used,
+            "free_bytes": disk.free,
+            "used_percent": round((disk.used / disk.total) * 100, 1) if disk.total else 0,
+        },
+        "processes": {
+            "ffmpeg_active": ffmpeg_count,
+            "publishers_active": publisher_count,
+        },
+        "services": {
+            "api": True,
+            "srs_rtmp_1935": check_tcp_port("127.0.0.1", 1935),
+            "srs_hls_8080": check_tcp_port("127.0.0.1", 8080),
+        },
     }
 
 
@@ -144,8 +317,11 @@ def build_ffmpeg_command(stream_key: str, destinations: list[str]) -> list[str]:
     command = [
         FFMPEG_BIN,
         "-hide_banner",
+        "-nostats",
         "-loglevel",
         "warning",
+        "-progress",
+        "pipe:2",
         "-i",
         input_url,
         "-c",
@@ -261,14 +437,32 @@ def health() -> dict[str, Any]:
     return {"status": "ok", "active_streams": active_count}
 
 
+@app.get("/system_metrics")
+def system_metrics() -> dict[str, Any]:
+    """Expose lightweight server metrics for the admin dashboard."""
+
+    return system_metrics_payload()
+
+
 @app.get("/active_streams")
 def active_streams() -> dict[str, Any]:
     """Expose active stream keys for the Streamlit admin panel."""
 
     with process_lock:
         streams = [process_snapshot(key, entry) for key, entry in active_processes.items()]
+        publishers = [
+            {"stream_key": key, **value}
+            for key, value in active_publishers.items()
+        ]
         recent = recent_processes[:20]
-    return {"code": 0, "streams": streams, "recent": recent}
+    return {"code": 0, "streams": streams, "publishers": publishers, "recent": recent}
+
+
+@app.get("/stream_status/{stream_key}")
+def stream_status(stream_key: str) -> dict[str, Any]:
+    """Expose client-facing live status for one stream key."""
+
+    return stream_status_payload(stream_key)
 
 
 @app.get("/stream_logs/{stream_key}")
@@ -329,6 +523,13 @@ async def on_publish(request: Request) -> JSONResponse:
         logger.exception("Failed to start FFmpeg for %s", stream_key)
         return srs_error(f"failed to start restream: {exc}", status_code=500)
 
+    with process_lock:
+        active_publishers[stream_key] = {
+            "published_at": utc_now_iso(),
+            "destinations": len(destinations),
+            "ffmpeg_started": started,
+        }
+
     return JSONResponse(
         status_code=200,
         content={
@@ -349,6 +550,8 @@ async def on_unpublish(request: Request) -> JSONResponse:
     if not stream_key:
         return srs_error("stream key is required", status_code=400)
 
+    with process_lock:
+        active_publishers.pop(stream_key, None)
     stopped = stop_process(stream_key)
     return JSONResponse(
         status_code=200,

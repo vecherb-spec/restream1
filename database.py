@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import os
 import secrets
+import shutil
 import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -19,6 +20,7 @@ from typing import Any
 
 
 DATABASE_PATH = Path(os.getenv("RESTREAM_DB_PATH", "restream.db"))
+BACKUP_DIR = Path(os.getenv("RESTREAM_BACKUP_DIR", "backups"))
 
 DEFAULT_ADMIN_USERNAME = "admin"
 DEFAULT_ADMIN_PASSWORD = "admin_password_2026"
@@ -274,6 +276,46 @@ def delete_auth_session(token: str) -> None:
         )
 
 
+def create_database_backup() -> dict[str, Any]:
+    """Create a timestamped copy of the SQLite database."""
+
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    backup_path = BACKUP_DIR / f"restream_{timestamp}.db"
+    shutil.copy2(DATABASE_PATH, backup_path)
+    return {
+        "path": str(backup_path),
+        "filename": backup_path.name,
+        "size_bytes": backup_path.stat().st_size,
+        "created_at": utc_now_iso(),
+    }
+
+
+def list_database_backups(limit: int = 14) -> list[dict[str, Any]]:
+    """List recent database backups."""
+
+    if not BACKUP_DIR.exists():
+        return []
+
+    backups = sorted(
+        (path for path in BACKUP_DIR.glob("restream_*.db") if path.is_file()),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    return [
+        {
+            "path": str(path),
+            "filename": path.name,
+            "size_bytes": path.stat().st_size,
+            "created_at": datetime.fromtimestamp(
+                path.stat().st_mtime,
+                tz=timezone.utc,
+            ).isoformat(timespec="seconds"),
+        }
+        for path in backups[:limit]
+    ]
+
+
 def get_user_by_id(user_id: int) -> dict[str, Any] | None:
     """Fetch a user by primary key."""
 
@@ -342,6 +384,32 @@ def update_user_password(user_id: int, new_password: str) -> tuple[bool, str]:
 
     if cursor.rowcount == 0:
         return False, "Пользователь не найден."
+    return True, "Пароль обновлен."
+
+
+def change_user_password(
+    user_id: int,
+    current_password: str,
+    new_password: str,
+) -> tuple[bool, str]:
+    """Change a user's own password after verifying the current password."""
+
+    if len(new_password) < 8:
+        return False, "Новый пароль должен быть не короче 8 символов."
+
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT password FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+        if row is None:
+            return False, "Пользователь не найден."
+        if not verify_password(current_password, row["password"]):
+            return False, "Текущий пароль неверный."
+        connection.execute(
+            "UPDATE users SET password = ? WHERE id = ?",
+            (hash_password(new_password), user_id),
+        )
     return True, "Пароль обновлен."
 
 
