@@ -166,13 +166,15 @@ def render_hls_preview(stream_key: str) -> None:
     components.html(
         f"""
         <div style="font-family: sans-serif;">
-          <video
-            id="{player_id}"
-            controls
-            muted
-            playsinline
-            style="width: 100%; max-height: 420px; background: #111; border-radius: 12px;"
-          ></video>
+          <div id="{player_id}-wrap" style="display: inline-block; max-width: 100%;">
+            <video
+              id="{player_id}"
+              controls
+              muted
+              playsinline
+              style="width: auto; max-width: 100%; height: auto; max-height: 420px; background: #111; border-radius: 12px;"
+            ></video>
+          </div>
           <div id="{player_id}-status" style="margin-top: 8px; color: #666; font-size: 14px;">
             Если эфир уже запущен, превью может появиться через 10-30 секунд.
           </div>
@@ -180,16 +182,36 @@ def render_hls_preview(stream_key: str) -> None:
         <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
         <script>
           const video = document.getElementById("{player_id}");
+          const wrapper = document.getElementById("{player_id}-wrap");
           const statusBox = document.getElementById("{player_id}-status");
           const sourceUrl = {preview_url_js};
+          const maxPlayerHeight = 420;
 
           function setStatus(message) {{
             statusBox.textContent = message;
           }}
 
+          function resizePlayer() {{
+            if (!video.videoWidth || !video.videoHeight) {{
+              return;
+            }}
+
+            const availableWidth = Math.max(280, document.documentElement.clientWidth - 24);
+            const aspectRatio = video.videoWidth / video.videoHeight;
+            const widthByHeight = maxPlayerHeight * aspectRatio;
+            const targetWidth = Math.min(video.videoWidth, widthByHeight, availableWidth);
+
+            video.style.width = `${{Math.round(targetWidth)}}px`;
+            wrapper.style.width = video.style.width;
+          }}
+
+          video.addEventListener("loadedmetadata", resizePlayer);
+          window.addEventListener("resize", resizePlayer);
+
           if (video.canPlayType("application/vnd.apple.mpegurl")) {{
             video.src = sourceUrl;
             video.addEventListener("loadedmetadata", function () {{
+              resizePlayer();
               setStatus("Превью подключено. Нажмите Play.");
             }});
             video.addEventListener("error", function () {{
@@ -203,6 +225,7 @@ def render_hls_preview(stream_key: str) -> None:
             hls.loadSource(sourceUrl);
             hls.attachMedia(video);
             hls.on(Hls.Events.MANIFEST_PARSED, function () {{
+              resizePlayer();
               setStatus("Превью подключено. Нажмите Play.");
             }});
             hls.on(Hls.Events.ERROR, function (_event, data) {{
