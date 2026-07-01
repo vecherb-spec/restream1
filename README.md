@@ -73,6 +73,16 @@ The endpoint streams the same payload as `/api/me/stream-status` once per
 second. The Next.js client falls back to slower polling if the SSE connection is
 temporarily unavailable.
 
+The admin dashboard uses a similar live feed:
+
+```text
+GET /api/admin/dashboard/events
+```
+
+It streams CPU/RAM/disk metrics, active SRS publishers, FFmpeg workers, and
+recent exits once per second. Users and database backups are loaded separately
+because they change less often.
+
 ## Database backends
 
 SQLite remains the default for an already-running single-server MVP:
@@ -129,6 +139,43 @@ postgres  -> PostgreSQL internal service
 
 Use this first as a staging environment. The current manual/systemd production
 setup can keep running while you validate PostgreSQL and container deployment.
+
+## Production healthchecks and backups
+
+Scripts for a systemd-based production host live in `deploy/scripts/`:
+
+```bash
+chmod +x deploy/scripts/*.sh
+
+# Check API, frontend, SRS, and optional systemd units
+deploy/scripts/healthcheck.sh
+
+# Restart failed services if healthcheck fails
+deploy/scripts/recover_services.sh
+
+# Daily PostgreSQL backup (requires DATABASE_URL)
+deploy/scripts/backup_postgres.sh
+```
+
+Example systemd timer for daily PostgreSQL backups:
+
+```ini
+[Unit]
+Description=Daily Restream PostgreSQL backup
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+Install log rotation for application and FFmpeg logs:
+
+```bash
+sudo cp deploy/logrotate/restream /etc/logrotate.d/restream
+```
 
 ## HLS preview in the client cabinet
 

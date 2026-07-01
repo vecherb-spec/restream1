@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { HlsPreview } from "@/components/HlsPreview";
 import {
+  AdminLiveDashboard,
   BackupInfo,
   OBS_SERVER_URL,
   RestreamSettings,
@@ -13,6 +14,7 @@ import {
   User,
   createAdminBackup,
   getAdminBackups,
+  getAdminDashboardEventsUrl,
   getAdminStreamLogs,
   getAdminStreams,
   getAdminSystemMetrics,
@@ -425,23 +427,27 @@ function AdminDashboard({
   const [publishers, setPublishers] = useState<StreamPublisher[]>([]);
   const [recent, setRecent] = useState<StreamProcess[]>([]);
   const [backups, setBackups] = useState<BackupInfo[]>([]);
+  const [databaseBackend, setDatabaseBackend] = useState<"sqlite" | "postgres">("sqlite");
+  const [transport, setTransport] = useState<"sse" | "fallback">("sse");
   const [logLines, setLogLines] = useState<string[]>([]);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
-  async function loadAdminData() {
+  function applyLiveDashboard(payload: AdminLiveDashboard) {
+    setMetrics(payload.metrics);
+    setStreams(payload.streams);
+    setPublishers(payload.publishers);
+    setRecent(payload.recent);
+    setDatabaseBackend(payload.database_backend);
+  }
+
+  async function loadStaticAdminData() {
     try {
-      const [usersResponse, metricsResponse, streamsResponse, backupsResponse] = await Promise.all([
+      const [usersResponse, backupsResponse] = await Promise.all([
         getAdminUsers(),
-        getAdminSystemMetrics(),
-        getAdminStreams(),
         getAdminBackups(),
       ]);
       setUsers(usersResponse.users);
-      setMetrics(metricsResponse);
-      setStreams(streamsResponse.streams);
-      setPublishers(streamsResponse.publishers);
-      setRecent(streamsResponse.recent);
       setBackups(backupsResponse.backups);
       setError("");
     } catch (requestError) {
@@ -449,12 +455,67 @@ function AdminDashboard({
     }
   }
 
+  async function loadLiveAdminDataFallback() {
+    try {
+      const [metricsResponse, streamsResponse] = await Promise.all([
+        getAdminSystemMetrics(),
+        getAdminStreams(),
+      ]);
+      setMetrics(metricsResponse);
+      setStreams(streamsResponse.streams);
+      setPublishers(streamsResponse.publishers);
+      setRecent(streamsResponse.recent);
+      setError("");
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Ошибка загрузки админки");
+    }
+  }
+
   useEffect(() => {
-    const initialLoadId = window.setTimeout(loadAdminData, 0);
-    const intervalId = window.setInterval(loadAdminData, 5000);
+    let active = true;
+    let fallbackIntervalId: number | undefined;
+
+    const staticLoadId = window.setTimeout(() => {
+      loadStaticAdminData().catch(() => undefined);
+    }, 0);
+
+    const liveLoadId = window.setTimeout(() => {
+      loadLiveAdminDataFallback().catch(() => undefined);
+    }, 0);
+
+    const eventSource = new EventSource(getAdminDashboardEventsUrl(), { withCredentials: true });
+    eventSource.onmessage = (event) => {
+      if (!active) {
+        return;
+      }
+      try {
+        applyLiveDashboard(JSON.parse(event.data) as AdminLiveDashboard);
+        setTransport("sse");
+        setError("");
+      } catch {
+        setError("Некорректный SSE payload админки");
+      }
+    };
+    eventSource.onerror = () => {
+      if (!active) {
+        return;
+      }
+      setTransport("fallback");
+      if (!fallbackIntervalId) {
+        fallbackIntervalId = window.setInterval(() => {
+          loadLiveAdminDataFallback().catch(() => undefined);
+        }, 5000);
+      }
+    };
+
     return () => {
-      window.clearTimeout(initialLoadId);
-      window.clearInterval(intervalId);
+      active = false;
+      window.clearTimeout(staticLoadId);
+      window.clearTimeout(liveLoadId);
+      eventSource.close();
+      if (fallbackIntervalId) {
+        window.clearInterval(fallbackIntervalId);
+      }
     };
   }, []);
 
@@ -466,7 +527,7 @@ function AdminDashboard({
   async function toggleUser(userId: number, isActive: boolean) {
     await setAdminUserActive(userId, isActive);
     setMessage(isActive ? "Пользователь разблокирован." : "Пользователь заблокирован.");
-    await loadAdminData();
+    await loadStaticAdminData();
   }
 
   async function resetPassword(userId: number) {
@@ -494,7 +555,7 @@ function AdminDashboard({
     }
     await updateAdminUserPlan(userId, plan, maxDestinations);
     setMessage("Тариф обновлен.");
-    await loadAdminData();
+    await loadStaticAdminData();
   }
 
   async function resetStreamKey(userId: number) {
@@ -503,13 +564,12 @@ function AdminDashboard({
     }
     const response = await resetAdminUserStreamKey(userId);
     setMessage(`Новый stream key: ${response.stream_key}`);
-    await loadAdminData();
+    await loadStaticAdminData();
   }
 
   async function stopStream(streamKey: string) {
     await stopAdminStream(streamKey);
     setMessage("Эфир остановлен.");
-    await loadAdminData();
   }
 
   async function showLogs(streamKey: string) {
@@ -520,15 +580,20 @@ function AdminDashboard({
   async function createBackup() {
     const response = await createAdminBackup();
     setMessage(`Backup создан: ${response.backup.filename}`);
-    await loadAdminData();
+    await loadStaticAdminData();
   }
+
+  const backupTitle = databaseBackend === "postgres" ? "Backup PostgreSQL" : "Backup SQLite";
 
   return (
     <div className="shell">
       <header className="header">
         <div>
           <h1>Админка Restream</h1>
-          <p className="muted">Вы вошли как {user.username}. Данные обновляются каждые 5 секунд.</p>
+          <p className="muted">
+            Вы вошли как {user.username}. Мониторинг:{" "}
+            {transport === "sse" ? "SSE live" : "fallback polling"}.
+          </p>
         </div>
         <button className="button secondary" onClick={handleLogout}>
           Выйти
@@ -579,7 +644,7 @@ function AdminDashboard({
       </div>
 
       <div className="card" style={{ marginTop: 16 }}>
-        <h2>Backup SQLite</h2>
+        <h2>{backupTitle}</h2>
         <button className="button" onClick={createBackup}>
           Создать backup
         </button>

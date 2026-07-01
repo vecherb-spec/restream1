@@ -113,6 +113,15 @@ export type SystemMetrics = {
   services: Record<string, boolean>;
 };
 
+export type AdminLiveDashboard = {
+  code: number;
+  database_backend: "sqlite" | "postgres";
+  metrics: SystemMetrics;
+  streams: StreamProcess[];
+  publishers: StreamPublisher[];
+  recent: StreamProcess[];
+};
+
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") || "";
 
@@ -189,6 +198,10 @@ export async function getStreamStatus(token?: string) {
 
 export function getStreamStatusEventsUrl() {
   return `${API_BASE_URL}/api/me/stream-status/events`;
+}
+
+export function getAdminDashboardEventsUrl() {
+  return `${API_BASE_URL}/api/admin/dashboard/events`;
 }
 
 export async function getAdminUsers(token?: string) {

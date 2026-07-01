@@ -30,6 +30,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from database import (
+    DATABASE_BACKEND,
     DATABASE_PATH,
     authenticate_user,
     change_user_password,
@@ -485,6 +486,29 @@ async def stream_status_events(request: Request, stream_key: str) -> Any:
         await asyncio.sleep(1)
 
 
+def admin_live_dashboard_payload() -> dict[str, Any]:
+    """Build live admin dashboard payload for metrics and stream workers."""
+
+    streams_payload = active_streams()
+    return {
+        "code": 0,
+        "database_backend": DATABASE_BACKEND,
+        "metrics": system_metrics_payload(),
+        "streams": streams_payload["streams"],
+        "publishers": streams_payload["publishers"],
+        "recent": streams_payload["recent"],
+    }
+
+
+async def admin_dashboard_events(request: Request) -> Any:
+    """Yield admin live dashboard data as Server-Sent Events."""
+
+    while not await request.is_disconnected():
+        payload = admin_live_dashboard_payload()
+        yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        await asyncio.sleep(1)
+
+
 def read_memory_metrics() -> dict[str, Any]:
     """Read Linux memory metrics from /proc/meminfo."""
 
@@ -798,6 +822,23 @@ def api_my_stream_status_events(
 
     return StreamingResponse(
         stream_status_events(request, user["stream_key"]),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.get("/api/admin/dashboard/events")
+def api_admin_dashboard_events(
+    request: Request,
+    _admin: dict[str, Any] = Depends(get_current_admin),
+) -> StreamingResponse:
+    """Stream admin metrics and stream workers via Server-Sent Events."""
+
+    return StreamingResponse(
+        admin_dashboard_events(request),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
