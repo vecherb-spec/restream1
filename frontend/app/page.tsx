@@ -11,7 +11,6 @@ import {
   StreamStatus,
   SystemMetrics,
   User,
-  clearToken,
   createAdminBackup,
   getAdminBackups,
   getAdminStreamLogs,
@@ -20,14 +19,12 @@ import {
   getAdminUsers,
   getMe,
   getStreamStatus,
-  getToken,
   login,
   logout,
   register,
   resetAdminUserPassword,
   resetAdminUserStreamKey,
   setAdminUserActive,
-  setToken,
   stopAdminStream,
   updateSettings,
   userToSettings,
@@ -70,7 +67,7 @@ function Lamp({ color }: { color: StreamStatus["color"] }) {
   return <span className={`lamp ${color}`} aria-label={color} />;
 }
 
-function AuthCard({ onAuthenticated }: { onAuthenticated: (token: string, user: User) => void }) {
+function AuthCard({ onAuthenticated }: { onAuthenticated: (user: User) => void }) {
   const [mode, setMode] = useState<AuthMode>("login");
   const [username, setUsername] = useState("");
   const [email, setEmail] = useState("");
@@ -87,8 +84,7 @@ function AuthCard({ onAuthenticated }: { onAuthenticated: (token: string, user: 
         mode === "login"
           ? await login(username, password)
           : await register(username, password, email);
-      setToken(response.token);
-      onAuthenticated(response.token, response.user);
+      onAuthenticated(response.user);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Ошибка авторизации");
     } finally {
@@ -145,7 +141,7 @@ function AuthCard({ onAuthenticated }: { onAuthenticated: (token: string, user: 
   );
 }
 
-function StreamStatusCard({ token }: { token: string }) {
+function StreamStatusCard() {
   const [status, setStatus] = useState<StreamStatus | null>(null);
   const [error, setError] = useState("");
 
@@ -154,7 +150,7 @@ function StreamStatusCard({ token }: { token: string }) {
 
     async function loadStatus() {
       try {
-        const nextStatus = await getStreamStatus(token);
+        const nextStatus = await getStreamStatus();
         if (active) {
           setStatus(nextStatus);
           setError("");
@@ -172,7 +168,7 @@ function StreamStatusCard({ token }: { token: string }) {
       active = false;
       window.clearInterval(intervalId);
     };
-  }, [token]);
+  }, []);
 
   if (error) {
     return <div className="error">{error}</div>;
@@ -212,11 +208,9 @@ function StreamStatusCard({ token }: { token: string }) {
 }
 
 function SettingsForm({
-  token,
   user,
   onSaved,
 }: {
-  token: string;
   user: User;
   onSaved: (user: User) => void;
 }) {
@@ -243,7 +237,7 @@ function SettingsForm({
     setError("");
     setMessage("");
     try {
-      const response = await updateSettings(token, settings);
+      const response = await updateSettings(settings);
       onSaved(response.user);
       setMessage("Настройки сохранены. Перезапустите эфир в OBS.");
     } catch (requestError) {
@@ -309,19 +303,16 @@ function SettingsForm({
 }
 
 function Dashboard({
-  token,
   user,
   onLogout,
   onUserChange,
 }: {
-  token: string;
   user: User;
   onLogout: () => void;
   onUserChange: (user: User) => void;
 }) {
   async function handleLogout() {
-    await logout(token).catch(() => undefined);
-    clearToken();
+    await logout().catch(() => undefined);
     onLogout();
   }
 
@@ -345,7 +336,7 @@ function Dashboard({
           <p className="muted">Stream Key</p>
           <strong>{user.stream_key}</strong>
         </div>
-        <StreamStatusCard token={token} />
+        <StreamStatusCard />
       </div>
 
       <div className="card" style={{ marginTop: 16 }}>
@@ -354,18 +345,16 @@ function Dashboard({
       </div>
 
       <div style={{ marginTop: 16 }}>
-        <SettingsForm token={token} user={user} onSaved={onUserChange} />
+        <SettingsForm user={user} onSaved={onUserChange} />
       </div>
     </div>
   );
 }
 
 function AdminDashboard({
-  token,
   user,
   onLogout,
 }: {
-  token: string;
   user: User;
   onLogout: () => void;
 }) {
@@ -382,10 +371,10 @@ function AdminDashboard({
   async function loadAdminData() {
     try {
       const [usersResponse, metricsResponse, streamsResponse, backupsResponse] = await Promise.all([
-        getAdminUsers(token),
-        getAdminSystemMetrics(token),
-        getAdminStreams(token),
-        getAdminBackups(token),
+        getAdminUsers(),
+        getAdminSystemMetrics(),
+        getAdminStreams(),
+        getAdminBackups(),
       ]);
       setUsers(usersResponse.users);
       setMetrics(metricsResponse);
@@ -406,17 +395,15 @@ function AdminDashboard({
       window.clearTimeout(initialLoadId);
       window.clearInterval(intervalId);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token]);
+  }, []);
 
   async function handleLogout() {
-    await logout(token).catch(() => undefined);
-    clearToken();
+    await logout().catch(() => undefined);
     onLogout();
   }
 
   async function toggleUser(userId: number, isActive: boolean) {
-    await setAdminUserActive(token, userId, isActive);
+    await setAdminUserActive(userId, isActive);
     setMessage(isActive ? "Пользователь разблокирован." : "Пользователь заблокирован.");
     await loadAdminData();
   }
@@ -426,7 +413,7 @@ function AdminDashboard({
     if (!newPassword) {
       return;
     }
-    await resetAdminUserPassword(token, userId, newPassword);
+    await resetAdminUserPassword(userId, newPassword);
     setMessage("Пароль обновлен.");
   }
 
@@ -434,24 +421,24 @@ function AdminDashboard({
     if (!window.confirm("Сбросить stream key пользователя? Старый ключ перестанет работать.")) {
       return;
     }
-    const response = await resetAdminUserStreamKey(token, userId);
+    const response = await resetAdminUserStreamKey(userId);
     setMessage(`Новый stream key: ${response.stream_key}`);
     await loadAdminData();
   }
 
   async function stopStream(streamKey: string) {
-    await stopAdminStream(token, streamKey);
+    await stopAdminStream(streamKey);
     setMessage("Эфир остановлен.");
     await loadAdminData();
   }
 
   async function showLogs(streamKey: string) {
-    const response = await getAdminStreamLogs(token, streamKey);
+    const response = await getAdminStreamLogs(streamKey);
     setLogLines(response.lines || []);
   }
 
   async function createBackup() {
-    const response = await createAdminBackup(token);
+    const response = await createAdminBackup();
     setMessage(`Backup создан: ${response.backup.filename}`);
     await loadAdminData();
   }
@@ -676,46 +663,40 @@ function AdminDashboard({
 }
 
 export default function Home() {
-  const [token, setCurrentToken] = useState("");
   const [user, setUser] = useState<User | null>(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const storedToken = getToken();
-    if (!storedToken) {
-      return;
-    }
-
-    getMe(storedToken)
+    getMe()
       .then((response) => {
-        setCurrentToken(storedToken);
         setUser(response.user);
       })
-      .catch(() => clearToken());
+      .catch(() => setUser(null))
+      .finally(() => setLoading(false));
   }, []);
 
-  function onAuthenticated(nextToken: string, nextUser: User) {
-    setCurrentToken(nextToken);
+  function onAuthenticated(nextUser: User) {
     setUser(nextUser);
+  }
+
+  if (loading) {
+    return <main className="page">Загрузка...</main>;
   }
 
   return (
     <main className="page">
-      {token && user?.role === "admin" ? (
+      {user?.role === "admin" ? (
         <AdminDashboard
-          token={token}
           user={user}
           onLogout={() => {
-            setCurrentToken("");
             setUser(null);
           }}
         />
-      ) : token && user ? (
+      ) : user ? (
         <Dashboard
-          token={token}
           user={user}
           onUserChange={setUser}
           onLogout={() => {
-            setCurrentToken("");
             setUser(null);
           }}
         />

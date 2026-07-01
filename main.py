@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, Header, HTTPException, Request
+from fastapi import Cookie, Depends, Header, HTTPException, Request, Response
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -84,6 +84,10 @@ SRS_INPUT_URL_TEMPLATE = os.getenv(
 FFMPEG_BIN = os.getenv("FFMPEG_BIN", "ffmpeg")
 FFPROBE_BIN = os.getenv("FFPROBE_BIN", "ffprobe")
 LOG_DIR = Path(os.getenv("RESTREAM_LOG_DIR", "logs"))
+COOKIE_NAME = os.getenv("RESTREAM_COOKIE_NAME", "restream_session")
+COOKIE_MAX_AGE_SECONDS = int(os.getenv("RESTREAM_AUTH_SESSION_DAYS", "7")) * 24 * 60 * 60
+COOKIE_SECURE = os.getenv("RESTREAM_COOKIE_SECURE", "true").lower() == "true"
+COOKIE_DOMAIN = os.getenv("RESTREAM_COOKIE_DOMAIN", "").strip() or None
 
 active_processes: dict[str, dict[str, Any]] = {}
 active_publishers: dict[str, dict[str, Any]] = {}
@@ -140,29 +144,62 @@ def public_user(user: dict[str, Any] | None) -> dict[str, Any] | None:
     return {key: value for key, value in user.items() if key != "password"}
 
 
-def create_token_response(user: dict[str, Any]) -> dict[str, Any]:
-    """Create API auth response with a persistent session token."""
+def set_session_cookie(response: Response, token: str) -> None:
+    """Set the HttpOnly browser session cookie used by the Next.js frontend."""
+
+    response.set_cookie(
+        key=COOKIE_NAME,
+        value=token,
+        max_age=COOKIE_MAX_AGE_SECONDS,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite="lax",
+        domain=COOKIE_DOMAIN,
+        path="/",
+    )
+
+
+def clear_session_cookie(response: Response) -> None:
+    """Clear the browser session cookie."""
+
+    response.delete_cookie(
+        key=COOKIE_NAME,
+        domain=COOKIE_DOMAIN,
+        path="/",
+    )
+
+
+def create_token_response(user: dict[str, Any], response: Response | None = None) -> dict[str, Any]:
+    """Create API auth response and optionally attach the cookie session."""
 
     token = create_auth_session(int(user["id"]))
+    if response is not None:
+        set_session_cookie(response, token)
     return {"code": 0, "token": token, "user": public_user(user)}
 
 
-def extract_bearer_token(authorization: str | None) -> str:
+def extract_bearer_token(authorization: str | None) -> str | None:
     """Extract a Bearer token from an Authorization header."""
 
     if not authorization:
-        raise HTTPException(status_code=401, detail="Authorization header is required")
+        return None
 
     scheme, _, token = authorization.partition(" ")
     if scheme.lower() != "bearer" or not token:
-        raise HTTPException(status_code=401, detail="Bearer token is required")
+        return None
     return token.strip()
 
 
-def get_current_api_user(authorization: str | None = Header(default=None)) -> dict[str, Any]:
-    """Resolve the current API user from a Bearer session token."""
+def get_current_api_user(
+    authorization: str | None = Header(default=None),
+    session_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
+) -> dict[str, Any]:
+    """Resolve the current API user from an HttpOnly cookie or Bearer token."""
 
-    token = extract_bearer_token(authorization)
+    cookie_token = session_cookie if isinstance(session_cookie, str) else None
+    token = cookie_token or extract_bearer_token(authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="Session cookie or Bearer token is required")
     user = get_user_by_session_token(token)
     if user is None:
         raise HTTPException(status_code=401, detail="Invalid or expired session")
@@ -617,31 +654,38 @@ def start_ffmpeg(stream_key: str, destinations: list[str]) -> bool:
 
 
 @app.post("/api/auth/login")
-def api_login(payload: LoginPayload) -> dict[str, Any]:
+def api_login(payload: LoginPayload, response: Response) -> dict[str, Any]:
     """Authenticate a user for the future web frontend."""
 
     user = authenticate_user(payload.username, payload.password)
     if user is None:
         raise HTTPException(status_code=401, detail="Invalid credentials or blocked account")
-    return create_token_response(user)
+    return create_token_response(user, response)
 
 
 @app.post("/api/auth/register")
-def api_register(payload: RegisterPayload) -> dict[str, Any]:
+def api_register(payload: RegisterPayload, response: Response) -> dict[str, Any]:
     """Register a client user and return an API session token."""
 
     success, message, user = create_user(payload.username, payload.password, payload.email)
     if not success or user is None:
         raise HTTPException(status_code=400, detail=message)
-    return create_token_response(user)
+    return create_token_response(user, response)
 
 
 @app.post("/api/auth/logout")
-def api_logout(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+def api_logout(
+    response: Response,
+    authorization: str | None = Header(default=None),
+    session_cookie: str | None = Cookie(default=None, alias=COOKIE_NAME),
+) -> dict[str, Any]:
     """Delete the current API session token."""
 
-    token = extract_bearer_token(authorization)
-    delete_auth_session(token)
+    cookie_token = session_cookie if isinstance(session_cookie, str) else None
+    token = cookie_token or extract_bearer_token(authorization)
+    if token:
+        delete_auth_session(token)
+    clear_session_cookie(response)
     return {"code": 0, "message": "Logged out"}
 
 

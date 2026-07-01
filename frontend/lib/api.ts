@@ -112,7 +112,7 @@ export type SystemMetrics = {
 };
 
 const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") || "http://localhost:8000";
+  process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") || "";
 
 export const OBS_SERVER_URL =
   process.env.NEXT_PUBLIC_OBS_SERVER_URL || "rtmp://restream.medialive.ru/live";
@@ -120,25 +120,6 @@ export const OBS_SERVER_URL =
 export const HLS_BASE_URL =
   process.env.NEXT_PUBLIC_HLS_BASE_URL?.replace(/\/$/, "") ||
   "https://restream.medialive.ru/srs/live";
-
-export function tokenStorage() {
-  if (typeof window === "undefined") {
-    return null;
-  }
-  return window.localStorage;
-}
-
-export function getToken() {
-  return tokenStorage()?.getItem("restream_token") || "";
-}
-
-export function setToken(token: string) {
-  tokenStorage()?.setItem("restream_token", token);
-}
-
-export function clearToken() {
-  tokenStorage()?.removeItem("restream_token");
-}
 
 async function request<T>(
   path: string,
@@ -154,6 +135,7 @@ async function request<T>(
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...options,
     headers,
+    credentials: "include",
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -176,19 +158,19 @@ export async function register(username: string, password: string, email: string
   });
 }
 
-export async function logout(token: string) {
+export async function logout(token?: string) {
   return request<{ code: number }>("/api/auth/logout", { method: "POST" }, token);
 }
 
-export async function getMe(token: string) {
+export async function getMe(token?: string) {
   return request<{ code: number; user: User }>("/api/me", {}, token);
 }
 
-export async function getSettings(token: string) {
+export async function getSettings(token?: string) {
   return request<{ code: number; user: User }>("/api/me/settings", {}, token);
 }
 
-export async function updateSettings(token: string, settings: RestreamSettings) {
+export async function updateSettings(settings: RestreamSettings, token?: string) {
   return request<{ code: number; user: User }>(
     "/api/me/settings",
     {
@@ -199,15 +181,15 @@ export async function updateSettings(token: string, settings: RestreamSettings) 
   );
 }
 
-export async function getStreamStatus(token: string) {
+export async function getStreamStatus(token?: string) {
   return request<StreamStatus>("/api/me/stream-status", {}, token);
 }
 
-export async function getAdminUsers(token: string) {
+export async function getAdminUsers(token?: string) {
   return request<{ code: number; users: User[] }>("/api/admin/users", {}, token);
 }
 
-export async function setAdminUserActive(token: string, userId: number, isActive: boolean) {
+export async function setAdminUserActive(userId: number, isActive: boolean, token?: string) {
   return request<{ code: number; user: User }>(
     `/api/admin/users/${userId}/active`,
     {
@@ -218,7 +200,7 @@ export async function setAdminUserActive(token: string, userId: number, isActive
   );
 }
 
-export async function resetAdminUserPassword(token: string, userId: number, newPassword: string) {
+export async function resetAdminUserPassword(userId: number, newPassword: string, token?: string) {
   return request<{ code: number; message: string }>(
     `/api/admin/users/${userId}/password`,
     {
@@ -229,7 +211,7 @@ export async function resetAdminUserPassword(token: string, userId: number, newP
   );
 }
 
-export async function resetAdminUserStreamKey(token: string, userId: number) {
+export async function resetAdminUserStreamKey(userId: number, token?: string) {
   return request<{ code: number; message: string; stream_key: string }>(
     `/api/admin/users/${userId}/stream-key`,
     { method: "POST" },
@@ -237,7 +219,7 @@ export async function resetAdminUserStreamKey(token: string, userId: number) {
   );
 }
 
-export async function getAdminStreams(token: string) {
+export async function getAdminStreams(token?: string) {
   return request<{
     code: number;
     streams: StreamProcess[];
@@ -246,7 +228,7 @@ export async function getAdminStreams(token: string) {
   }>("/api/admin/streams", {}, token);
 }
 
-export async function stopAdminStream(token: string, streamKey: string) {
+export async function stopAdminStream(streamKey: string, token?: string) {
   return request<{ code: number; stream_key: string; stopped: boolean }>(
     `/api/admin/streams/${streamKey}/stop`,
     { method: "POST" },
@@ -254,7 +236,7 @@ export async function stopAdminStream(token: string, streamKey: string) {
   );
 }
 
-export async function getAdminStreamLogs(token: string, streamKey: string) {
+export async function getAdminStreamLogs(streamKey: string, token?: string) {
   return request<{ code: number; lines: string[] }>(
     `/api/admin/streams/${streamKey}/logs`,
     {},
@@ -262,15 +244,15 @@ export async function getAdminStreamLogs(token: string, streamKey: string) {
   );
 }
 
-export async function getAdminSystemMetrics(token: string) {
+export async function getAdminSystemMetrics(token?: string) {
   return request<SystemMetrics>("/api/admin/system-metrics", {}, token);
 }
 
-export async function getAdminBackups(token: string) {
+export async function getAdminBackups(token?: string) {
   return request<{ code: number; backups: BackupInfo[] }>("/api/admin/backups", {}, token);
 }
 
-export async function createAdminBackup(token: string) {
+export async function createAdminBackup(token?: string) {
   return request<{ code: number; backup: BackupInfo }>(
     "/api/admin/backups",
     { method: "POST" },

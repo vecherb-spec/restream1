@@ -24,9 +24,20 @@ npm run start
 Useful environment variables:
 
 ```bash
-NEXT_PUBLIC_API_BASE_URL=https://restream.medialive.ru
+# Leave empty in production when Nginx serves frontend and /api on the same domain.
+NEXT_PUBLIC_API_BASE_URL=
 NEXT_PUBLIC_OBS_SERVER_URL=rtmp://restream.medialive.ru/live
 NEXT_PUBLIC_HLS_BASE_URL=https://restream.medialive.ru/srs/live
+```
+
+The frontend uses an HttpOnly `restream_session` cookie set by FastAPI. Useful
+backend cookie variables:
+
+```bash
+RESTREAM_COOKIE_NAME=restream_session
+RESTREAM_COOKIE_SECURE=true
+# Optional, usually leave empty for a host-only cookie.
+RESTREAM_COOKIE_DOMAIN=
 ```
 
 ## HLS preview in the client cabinet
