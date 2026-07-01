@@ -10,11 +10,14 @@ through Streamlit's built-in multipage discovery.
 
 from __future__ import annotations
 
+import html
+import json
 import os
 from typing import Any
 
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 
 from database import (
     YOUTUBE_RTMP_URL,
@@ -32,6 +35,11 @@ from database import (
 
 OBS_SERVER_URL = "rtmp://restream.medialive.ru/live"
 BACKEND_URL = os.getenv("RESTREAM_BACKEND_URL", "http://localhost:8000").rstrip("/")
+PREVIEW_HLS_BASE_URL = os.getenv(
+    "RESTREAM_PREVIEW_HLS_BASE_URL",
+    "https://restream.medialive.ru/srs/live",
+).rstrip("/")
+PREVIEW_HLS_URL_TEMPLATE = os.getenv("RESTREAM_PREVIEW_HLS_URL_TEMPLATE", "").strip()
 
 
 def public_user(user: dict[str, Any]) -> dict[str, Any]:
@@ -140,6 +148,78 @@ def render_obs_instructions(user: dict[str, Any]) -> None:
         )
 
 
+def build_preview_hls_url(stream_key: str) -> str:
+    """Build the public HLS preview URL for a stream key."""
+
+    if PREVIEW_HLS_URL_TEMPLATE:
+        return PREVIEW_HLS_URL_TEMPLATE.format(stream_key=stream_key)
+    return f"{PREVIEW_HLS_BASE_URL}/{stream_key}.m3u8"
+
+
+def render_hls_preview(stream_key: str) -> None:
+    """Render a browser HLS player for the user's own live stream."""
+
+    preview_url = build_preview_hls_url(stream_key)
+    preview_url_js = json.dumps(preview_url)
+    player_id = f"preview-{html.escape(stream_key, quote=True)}"
+
+    components.html(
+        f"""
+        <div style="font-family: sans-serif;">
+          <video
+            id="{player_id}"
+            controls
+            muted
+            playsinline
+            style="width: 100%; max-height: 420px; background: #111; border-radius: 12px;"
+          ></video>
+          <div id="{player_id}-status" style="margin-top: 8px; color: #666; font-size: 14px;">
+            Если эфир уже запущен, превью может появиться через 10-30 секунд.
+          </div>
+        </div>
+        <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+        <script>
+          const video = document.getElementById("{player_id}");
+          const statusBox = document.getElementById("{player_id}-status");
+          const sourceUrl = {preview_url_js};
+
+          function setStatus(message) {{
+            statusBox.textContent = message;
+          }}
+
+          if (video.canPlayType("application/vnd.apple.mpegurl")) {{
+            video.src = sourceUrl;
+            video.addEventListener("loadedmetadata", function () {{
+              setStatus("Превью подключено. Нажмите Play.");
+            }});
+            video.addEventListener("error", function () {{
+              setStatus("Пока нет HLS-потока. Проверьте, что OBS запущен и SRS отдает HLS.");
+            }});
+          }} else if (window.Hls && window.Hls.isSupported()) {{
+            const hls = new Hls({{
+              lowLatencyMode: true,
+              liveSyncDurationCount: 3,
+            }});
+            hls.loadSource(sourceUrl);
+            hls.attachMedia(video);
+            hls.on(Hls.Events.MANIFEST_PARSED, function () {{
+              setStatus("Превью подключено. Нажмите Play.");
+            }});
+            hls.on(Hls.Events.ERROR, function (_event, data) {{
+              if (data && data.fatal) {{
+                setStatus("Пока нет HLS-потока или он недоступен. Обновите превью через несколько секунд.");
+              }}
+            }});
+          }} else {{
+            setStatus("Этот браузер не поддерживает HLS. Попробуйте Safari/Chrome/Edge.");
+          }}
+        </script>
+        """,
+        height=500,
+    )
+    st.caption(f"HLS preview URL: `{preview_url}`")
+
+
 def render_auth_page() -> None:
     """Render login and open registration page."""
 
@@ -242,6 +322,14 @@ def render_client_dashboard() -> None:
         "В OBS укажите URL сервера и ключ потока выше. "
         "FFmpeg будет запущен автоматически после webhook `/on_publish` от SRS."
     )
+
+    st.subheader("Превью вашего потока")
+    st.caption(
+        "Превью работает через HLS и обычно отстает от OBS на 10-30 секунд. "
+        "Если эфир не запущен, плеер будет пустым."
+    )
+    render_hls_preview(user["stream_key"])
+
     render_obs_instructions(user)
 
     with st.expander("Безопасность stream key", expanded=False):
