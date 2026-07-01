@@ -23,6 +23,8 @@ USER_FIELDS = [
     "password",
     "email",
     "role",
+    "plan",
+    "max_destinations",
     "stream_key",
     "is_active",
     "yt_active",

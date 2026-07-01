@@ -40,6 +40,27 @@ RESTREAM_COOKIE_SECURE=true
 RESTREAM_COOKIE_DOMAIN=
 ```
 
+## Plans and destination limits
+
+Each user has:
+
+```text
+plan
+max_destinations
+```
+
+Defaults:
+
+```bash
+RESTREAM_DEFAULT_CLIENT_PLAN=free
+RESTREAM_DEFAULT_MAX_DESTINATIONS=1
+RESTREAM_ADMIN_MAX_DESTINATIONS=99
+```
+
+Clients cannot save more active destinations than their `max_destinations`.
+Admins can edit a user's plan and destination limit from the Next.js admin
+panel. The SRS webhook also enforces the limit when starting FFmpeg.
+
 ## Database backends
 
 SQLite remains the default for an already-running single-server MVP:

@@ -29,6 +29,9 @@ DEFAULT_ADMIN_USERNAME = "admin"
 DEFAULT_ADMIN_PASSWORD = "admin_password_2026"
 YOUTUBE_RTMP_URL = "rtmp://a.rtmp.youtube.com/live2"
 AUTH_SESSION_DAYS = int(os.getenv("RESTREAM_AUTH_SESSION_DAYS", "7"))
+DEFAULT_CLIENT_PLAN = os.getenv("RESTREAM_DEFAULT_CLIENT_PLAN", "free")
+DEFAULT_MAX_DESTINATIONS = int(os.getenv("RESTREAM_DEFAULT_MAX_DESTINATIONS", "1"))
+ADMIN_MAX_DESTINATIONS = int(os.getenv("RESTREAM_ADMIN_MAX_DESTINATIONS", "99"))
 
 
 def normalize_database_url(url: str) -> str:
@@ -152,6 +155,37 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def column_exists(connection: sqlite3.Connection | PostgresConnection, table: str, column: str) -> bool:
+    """Return whether a table column already exists."""
+
+    if DATABASE_BACKEND == "postgres":
+        row = connection.execute(
+            """
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_name = ?
+              AND column_name = ?
+            """,
+            (table, column),
+        ).fetchone()
+        return row is not None
+
+    rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(row["name"] == column for row in rows)
+
+
+def ensure_column(
+    connection: sqlite3.Connection | PostgresConnection,
+    table: str,
+    column: str,
+    definition: str,
+) -> None:
+    """Add a column to an existing table when it is missing."""
+
+    if not column_exists(connection, table, column):
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
 def init_db() -> None:
     """Create the schema and seed the default administrator account."""
 
@@ -174,6 +208,8 @@ def init_db() -> None:
                 password TEXT NOT NULL,
                 email TEXT,
                 role TEXT NOT NULL DEFAULT 'client',
+                plan TEXT NOT NULL DEFAULT 'free',
+                max_destinations INTEGER NOT NULL DEFAULT 1,
                 stream_key TEXT NOT NULL UNIQUE,
                 is_active INTEGER NOT NULL DEFAULT 1,
                 yt_active INTEGER NOT NULL DEFAULT 0,
@@ -194,6 +230,8 @@ def init_db() -> None:
             )
             """
         )
+        ensure_column(connection, "users", "plan", "TEXT NOT NULL DEFAULT 'free'")
+        ensure_column(connection, "users", "max_destinations", "INTEGER NOT NULL DEFAULT 1")
         connection.execute(
             f"""
             CREATE TABLE IF NOT EXISTS auth_sessions (
@@ -219,18 +257,28 @@ def init_db() -> None:
             connection.execute(
                 """
                 INSERT INTO users (
-                    username, password, email, role, stream_key, is_active
+                    username, password, email, role, plan, max_destinations, stream_key, is_active
                 )
-                VALUES (?, ?, ?, ?, ?, 1)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1)
                 """,
                 (
                     DEFAULT_ADMIN_USERNAME,
                     hash_password(DEFAULT_ADMIN_PASSWORD),
                     "admin@restream.medialive.ru",
                     "admin",
+                    "admin",
+                    ADMIN_MAX_DESTINATIONS,
                     generate_stream_key(DEFAULT_ADMIN_USERNAME),
                 ),
             )
+        connection.execute(
+            """
+            UPDATE users
+            SET plan = 'admin', max_destinations = ?
+            WHERE username = ?
+            """,
+            (ADMIN_MAX_DESTINATIONS, DEFAULT_ADMIN_USERNAME),
+        )
 
 
 def create_user(username: str, password: str, email: str) -> tuple[bool, str, dict[str, Any] | None]:
@@ -247,10 +295,19 @@ def create_user(username: str, password: str, email: str) -> tuple[bool, str, di
             try:
                 connection.execute(
                     """
-                    INSERT INTO users (username, password, email, role, stream_key)
-                    VALUES (?, ?, ?, 'client', ?)
+                    INSERT INTO users (
+                        username, password, email, role, plan, max_destinations, stream_key
+                    )
+                    VALUES (?, ?, ?, 'client', ?, ?, ?)
                     """,
-                    (username, hash_password(password), email, stream_key),
+                    (
+                        username,
+                        hash_password(password),
+                        email,
+                        DEFAULT_CLIENT_PLAN,
+                        DEFAULT_MAX_DESTINATIONS,
+                        stream_key,
+                    ),
                 )
                 row = connection.execute(
                     "SELECT * FROM users WHERE username = ?",
@@ -435,7 +492,7 @@ def list_users() -> list[dict[str, Any]]:
         rows = connection.execute(
             """
             SELECT
-                id, username, email, role, stream_key, is_active,
+                id, username, email, role, plan, max_destinations, stream_key, is_active,
                 yt_active, vk_active, rt_active, tg_active, custom_active, created_at
             FROM users
             ORDER BY id ASC
@@ -452,6 +509,25 @@ def set_user_active(user_id: int, is_active: bool) -> None:
             "UPDATE users SET is_active = ? WHERE id = ?",
             (1 if is_active else 0, user_id),
         )
+
+
+def update_user_plan(user_id: int, plan: str, max_destinations: int) -> tuple[bool, str]:
+    """Update user's commercial plan and destination limit."""
+
+    plan = plan.strip().lower()
+    if not plan:
+        return False, "Название тарифа обязательно."
+    if max_destinations < 0:
+        return False, "Лимит площадок не может быть отрицательным."
+
+    with get_connection() as connection:
+        cursor = connection.execute(
+            "UPDATE users SET plan = ?, max_destinations = ? WHERE id = ?",
+            (plan, max_destinations, user_id),
+        )
+    if cursor.rowcount == 0:
+        return False, "Пользователь не найден."
+    return True, "Тариф обновлен."
 
 
 def update_user_password(user_id: int, new_password: str) -> tuple[bool, str]:
@@ -537,6 +613,34 @@ def get_enabled_platform_names(user: dict[str, Any]) -> list[str]:
     if user.get("custom_active") and user.get("custom_url") and user.get("custom_key"):
         platforms.append("Custom")
     return platforms
+
+
+def get_user_destination_limit(user: dict[str, Any]) -> int:
+    """Return max allowed active restream destinations for a user."""
+
+    try:
+        return max(0, int(user.get("max_destinations") or DEFAULT_MAX_DESTINATIONS))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_DESTINATIONS
+
+
+def count_enabled_destinations(user_or_settings: dict[str, Any]) -> int:
+    """Count enabled destinations with enough fields to build an RTMP target."""
+
+    return len(get_enabled_destinations(user_or_settings))
+
+
+def validate_destination_limit(user_or_settings: dict[str, Any]) -> tuple[bool, str]:
+    """Validate that enabled destinations fit the user's plan limit."""
+
+    active_destinations = count_enabled_destinations(user_or_settings)
+    limit = get_user_destination_limit(user_or_settings)
+    if active_destinations > limit:
+        return (
+            False,
+            f"Текущий тариф разрешает {limit} активных площадок, выбрано {active_destinations}.",
+        )
+    return True, ""
 
 
 def update_restream_settings(user_id: int, settings: dict[str, Any]) -> None:

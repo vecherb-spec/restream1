@@ -3,6 +3,8 @@ export type User = {
   username: string;
   email: string;
   role: "client" | "admin";
+  plan: string;
+  max_destinations: number;
   stream_key: string;
   is_active: number | boolean;
   yt_active: number | boolean;
@@ -206,6 +208,22 @@ export async function resetAdminUserPassword(userId: number, newPassword: string
     {
       method: "POST",
       body: JSON.stringify({ new_password: newPassword }),
+    },
+    token,
+  );
+}
+
+export async function updateAdminUserPlan(
+  userId: number,
+  plan: string,
+  maxDestinations: number,
+  token?: string,
+) {
+  return request<{ code: number; message: string; user: User }>(
+    `/api/admin/users/${userId}/plan`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ plan, max_destinations: maxDestinations }),
     },
     token,
   );

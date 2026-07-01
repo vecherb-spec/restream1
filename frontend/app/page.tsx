@@ -26,6 +26,7 @@ import {
   resetAdminUserStreamKey,
   setAdminUserActive,
   stopAdminStream,
+  updateAdminUserPlan,
   updateSettings,
   userToSettings,
 } from "@/lib/api";
@@ -65,6 +66,16 @@ function formatBytes(value?: number) {
 
 function Lamp({ color }: { color: StreamStatus["color"] }) {
   return <span className={`lamp ${color}`} aria-label={color} />;
+}
+
+function countEnabledDestinations(settings: RestreamSettings) {
+  let count = 0;
+  if (settings.yt_active && settings.yt_key.trim()) count += 1;
+  if (settings.vk_active && settings.vk_url.trim() && settings.vk_key.trim()) count += 1;
+  if (settings.rt_active && settings.rt_url.trim() && settings.rt_key.trim()) count += 1;
+  if (settings.tg_active && settings.tg_url.trim() && settings.tg_key.trim()) count += 1;
+  if (settings.custom_active && settings.custom_url.trim() && settings.custom_key.trim()) count += 1;
+  return count;
 }
 
 function AuthCard({ onAuthenticated }: { onAuthenticated: (user: User) => void }) {
@@ -217,6 +228,8 @@ function SettingsForm({
   const [settings, setSettings] = useState<RestreamSettings>(() => userToSettings(user));
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const enabledDestinations = countEnabledDestinations(settings);
+  const maxDestinations = user.max_destinations ?? 1;
 
   const platforms = useMemo(
     () => [
@@ -249,6 +262,14 @@ function SettingsForm({
     <form className="card" onSubmit={save}>
       <h2>Площадки рестрима</h2>
       <div className="alert">После сохранения настроек остановите и заново запустите эфир в OBS.</div>
+      <p className="muted">
+        Тариф `{user.plan || "free"}`: активно {enabledDestinations} из {maxDestinations} разрешенных площадок.
+      </p>
+      {enabledDestinations > maxDestinations && (
+        <div className="error">
+          Вы выбрали больше площадок, чем разрешено тарифом. Сохранение будет отклонено.
+        </div>
+      )}
 
       <div className="settings-row">
         <label>
@@ -335,6 +356,10 @@ function Dashboard({
           <strong>{OBS_SERVER_URL}</strong>
           <p className="muted">Stream Key</p>
           <strong>{user.stream_key}</strong>
+          <p className="muted">Тариф</p>
+          <strong>
+            {user.plan || "free"} · до {user.max_destinations ?? 1} активных площадок
+          </strong>
         </div>
         <StreamStatusCard />
       </div>
@@ -415,6 +440,25 @@ function AdminDashboard({
     }
     await resetAdminUserPassword(userId, newPassword);
     setMessage("Пароль обновлен.");
+  }
+
+  async function updatePlan(userId: number) {
+    const plan = window.prompt("Название тарифа", "free");
+    if (!plan) {
+      return;
+    }
+    const maxValue = window.prompt("Максимум активных площадок", "1");
+    if (maxValue == null) {
+      return;
+    }
+    const maxDestinations = Number.parseInt(maxValue, 10);
+    if (Number.isNaN(maxDestinations) || maxDestinations < 0) {
+      setError("Лимит площадок должен быть неотрицательным числом.");
+      return;
+    }
+    await updateAdminUserPlan(userId, plan, maxDestinations);
+    setMessage("Тариф обновлен.");
+    await loadAdminData();
   }
 
   async function resetStreamKey(userId: number) {
@@ -535,6 +579,8 @@ function AdminDashboard({
                 <th>Логин</th>
                 <th>Email</th>
                 <th>Роль</th>
+                <th>Тариф</th>
+                <th>Лимит</th>
                 <th>Stream key</th>
                 <th>Активен</th>
                 <th>Действия</th>
@@ -549,6 +595,8 @@ function AdminDashboard({
                     <td>{item.username}</td>
                     <td>{item.email}</td>
                     <td>{item.role}</td>
+                    <td>{item.plan || "free"}</td>
+                    <td>{item.max_destinations ?? 1}</td>
                     <td>{item.stream_key}</td>
                     <td>{active ? "Да" : "Нет"}</td>
                     <td>
@@ -558,6 +606,9 @@ function AdminDashboard({
                         </button>
                         <button className="button secondary" onClick={() => resetPassword(item.id)}>
                           Пароль
+                        </button>
+                        <button className="button secondary" onClick={() => updatePlan(item.id)}>
+                          Тариф
                         </button>
                         <button className="button secondary" onClick={() => resetStreamKey(item.id)}>
                           Stream key

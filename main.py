@@ -44,8 +44,10 @@ from database import (
     list_users,
     regenerate_user_stream_key,
     set_user_active,
+    update_user_plan,
     update_restream_settings,
     update_user_password,
+    validate_destination_limit,
 )
 
 
@@ -136,6 +138,11 @@ class ActivePayload(BaseModel):
     is_active: bool
 
 
+class PlanPayload(BaseModel):
+    plan: str
+    max_destinations: int
+
+
 def public_user(user: dict[str, Any] | None) -> dict[str, Any] | None:
     """Return a user payload safe enough for API responses."""
 
@@ -220,6 +227,20 @@ def model_to_dict(model: BaseModel) -> dict[str, Any]:
     if hasattr(model, "model_dump"):
         return model.model_dump()
     return model.dict()
+
+
+def build_pending_user_settings(user: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
+    """Merge current user row with pending restream settings."""
+
+    pending_user = dict(user)
+    for key, value in settings.items():
+        if key.endswith("_active"):
+            pending_user[key] = 1 if bool(value) else 0
+        elif isinstance(value, str):
+            pending_user[key] = value.strip()
+        else:
+            pending_user[key] = value
+    return pending_user
 
 
 def srs_error(message: str, status_code: int = 403) -> JSONResponse:
@@ -711,7 +732,12 @@ def api_update_my_settings(
 ) -> dict[str, Any]:
     """Update current user's restream settings."""
 
-    update_restream_settings(int(user["id"]), model_to_dict(payload))
+    settings = model_to_dict(payload)
+    pending_user = build_pending_user_settings(user, settings)
+    allowed, message = validate_destination_limit(pending_user)
+    if not allowed:
+        raise HTTPException(status_code=400, detail=message)
+    update_restream_settings(int(user["id"]), settings)
     fresh_user = get_user_by_id(int(user["id"]))
     return {"code": 0, "user": public_user(fresh_user)}
 
@@ -789,6 +815,20 @@ def api_admin_set_user_password(
     if not success:
         raise HTTPException(status_code=400, detail=message)
     return {"code": 0, "message": message}
+
+
+@app.patch("/api/admin/users/{user_id}/plan")
+def api_admin_set_user_plan(
+    user_id: int,
+    payload: PlanPayload,
+    _admin: dict[str, Any] = Depends(get_current_admin),
+) -> dict[str, Any]:
+    """Update a user's plan and destination limit as admin."""
+
+    success, message = update_user_plan(user_id, payload.plan, payload.max_destinations)
+    if not success:
+        raise HTTPException(status_code=400, detail=message)
+    return {"code": 0, "message": message, "user": public_user(get_user_by_id(user_id))}
 
 
 @app.post("/api/admin/users/{user_id}/stream-key")
@@ -948,6 +988,14 @@ async def on_publish(request: Request) -> JSONResponse:
         return srs_error("stream is not allowed")
 
     destinations = get_enabled_destinations(user)
+    allowed, limit_message = validate_destination_limit(user)
+    if not allowed:
+        logger.warning("Stream %s exceeds destination limit: %s", stream_key, limit_message)
+        try:
+            max_destinations = int(user.get("max_destinations") or 0)
+        except (TypeError, ValueError):
+            max_destinations = 0
+        destinations = destinations[:max(0, max_destinations)]
     try:
         started = start_ffmpeg(stream_key, destinations)
     except FileNotFoundError:
