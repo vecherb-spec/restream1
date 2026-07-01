@@ -13,12 +13,15 @@ import os
 import secrets
 import shutil
 import sqlite3
+import subprocess
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+DATABASE_BACKEND = "postgres" if DATABASE_URL.startswith(("postgresql://", "postgres://")) else "sqlite"
 DATABASE_PATH = Path(os.getenv("RESTREAM_DB_PATH", "restream.db"))
 BACKUP_DIR = Path(os.getenv("RESTREAM_BACKUP_DIR", "backups"))
 
@@ -28,8 +31,64 @@ YOUTUBE_RTMP_URL = "rtmp://a.rtmp.youtube.com/live2"
 AUTH_SESSION_DAYS = int(os.getenv("RESTREAM_AUTH_SESSION_DAYS", "7"))
 
 
-def get_connection() -> sqlite3.Connection:
-    """Create a SQLite connection configured for dictionary-like row access."""
+def normalize_database_url(url: str) -> str:
+    """Normalize URL schemes accepted by psycopg."""
+
+    if url.startswith("postgres://"):
+        return "postgresql://" + url.removeprefix("postgres://")
+    return url
+
+
+class PostgresConnection:
+    """Small compatibility wrapper around psycopg connections.
+
+    The existing MVP storage layer uses sqlite3-style `?` placeholders. This
+    wrapper lets the same functions talk to PostgreSQL during the migration
+    phase without rewriting every query at once.
+    """
+
+    def __init__(self) -> None:
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except ImportError as exc:
+            raise RuntimeError(
+                "PostgreSQL support requires psycopg[binary]. Install requirements.txt first."
+            ) from exc
+
+        self._connection = psycopg.connect(
+            normalize_database_url(DATABASE_URL),
+            row_factory=dict_row,
+        )
+
+    def execute(self, query: str, parameters: tuple[Any, ...] | list[Any] = ()) -> Any:
+        return self._connection.execute(query.replace("?", "%s"), parameters)
+
+    def commit(self) -> None:
+        self._connection.commit()
+
+    def rollback(self) -> None:
+        self._connection.rollback()
+
+    def close(self) -> None:
+        self._connection.close()
+
+    def __enter__(self) -> "PostgresConnection":
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        if exc_type is None:
+            self.commit()
+        else:
+            self.rollback()
+        self.close()
+
+
+def get_connection() -> sqlite3.Connection | PostgresConnection:
+    """Create a DB connection configured for dictionary-like row access."""
+
+    if DATABASE_BACKEND == "postgres":
+        return PostgresConnection()
 
     connection = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
     connection.row_factory = sqlite3.Row
@@ -81,8 +140,8 @@ def generate_stream_key(username: str | None = None) -> str:
     return f"live_{safe_username}_{uuid.uuid4().hex[:12]}"
 
 
-def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
-    """Convert sqlite3.Row objects to regular dictionaries."""
+def row_to_dict(row: sqlite3.Row | dict[str, Any] | None) -> dict[str, Any] | None:
+    """Convert DB row objects to regular dictionaries."""
 
     return dict(row) if row is not None else None
 
@@ -97,10 +156,20 @@ def init_db() -> None:
     """Create the schema and seed the default administrator account."""
 
     with get_connection() as connection:
+        user_id_definition = (
+            "SERIAL PRIMARY KEY"
+            if DATABASE_BACKEND == "postgres"
+            else "INTEGER PRIMARY KEY AUTOINCREMENT"
+        )
+        timestamp_default = (
+            "(CURRENT_TIMESTAMP::text)"
+            if DATABASE_BACKEND == "postgres"
+            else "CURRENT_TIMESTAMP"
+        )
         connection.execute(
-            """
+            f"""
             CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id {user_id_definition},
                 username TEXT NOT NULL UNIQUE,
                 password TEXT NOT NULL,
                 email TEXT,
@@ -121,18 +190,18 @@ def init_db() -> None:
                 custom_active INTEGER NOT NULL DEFAULT 0,
                 custom_url TEXT DEFAULT '',
                 custom_key TEXT DEFAULT '',
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                created_at TEXT NOT NULL DEFAULT {timestamp_default}
             )
             """
         )
         connection.execute(
-            """
+            f"""
             CREATE TABLE IF NOT EXISTS auth_sessions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id {user_id_definition},
                 user_id INTEGER NOT NULL,
                 token_hash TEXT NOT NULL UNIQUE,
                 expires_at TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                created_at TEXT NOT NULL DEFAULT {timestamp_default},
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             )
             """
@@ -176,7 +245,7 @@ def create_user(username: str, password: str, email: str) -> tuple[bool, str, di
         for _ in range(5):
             stream_key = generate_stream_key(username)
             try:
-                cursor = connection.execute(
+                connection.execute(
                     """
                     INSERT INTO users (username, password, email, role, stream_key)
                     VALUES (?, ?, ?, 'client', ?)
@@ -184,13 +253,14 @@ def create_user(username: str, password: str, email: str) -> tuple[bool, str, di
                     (username, hash_password(password), email, stream_key),
                 )
                 row = connection.execute(
-                    "SELECT * FROM users WHERE id = ?",
-                    (cursor.lastrowid,),
+                    "SELECT * FROM users WHERE username = ?",
+                    (username,),
                 ).fetchone()
                 user = row_to_dict(row)
                 return True, "Пользователь зарегистрирован.", user
-            except sqlite3.IntegrityError as exc:
-                if "stream_key" in str(exc).lower():
+            except Exception as exc:
+                error_text = str(exc).lower()
+                if "stream_key" in error_text:
                     continue
                 return False, "Пользователь с таким логином уже существует.", None
 
@@ -277,12 +347,21 @@ def delete_auth_session(token: str) -> None:
 
 
 def create_database_backup() -> dict[str, Any]:
-    """Create a timestamped copy of the SQLite database."""
+    """Create a timestamped database backup."""
 
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    backup_path = BACKUP_DIR / f"restream_{timestamp}.db"
-    shutil.copy2(DATABASE_PATH, backup_path)
+    if DATABASE_BACKEND == "postgres":
+        backup_path = BACKUP_DIR / f"restream_{timestamp}.sql"
+        subprocess.run(
+            ["pg_dump", normalize_database_url(DATABASE_URL), "-f", str(backup_path)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    else:
+        backup_path = BACKUP_DIR / f"restream_{timestamp}.db"
+        shutil.copy2(DATABASE_PATH, backup_path)
     return {
         "path": str(backup_path),
         "filename": backup_path.name,
@@ -298,7 +377,12 @@ def list_database_backups(limit: int = 14) -> list[dict[str, Any]]:
         return []
 
     backups = sorted(
-        (path for path in BACKUP_DIR.glob("restream_*.db") if path.is_file()),
+        (
+            path
+            for pattern in ("restream_*.db", "restream_*.sql")
+            for path in BACKUP_DIR.glob(pattern)
+            if path.is_file()
+        ),
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )

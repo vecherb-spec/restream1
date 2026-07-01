@@ -40,6 +40,63 @@ RESTREAM_COOKIE_SECURE=true
 RESTREAM_COOKIE_DOMAIN=
 ```
 
+## Database backends
+
+SQLite remains the default for an already-running single-server MVP:
+
+```bash
+RESTREAM_DB_PATH=/opt/restream/restream.db
+DATABASE_URL=
+```
+
+PostgreSQL can be enabled by setting `DATABASE_URL`:
+
+```bash
+DATABASE_URL=postgresql://restream:change_me@127.0.0.1:5432/restream
+```
+
+The Python storage layer keeps SQLite compatibility and switches to PostgreSQL
+when `DATABASE_URL` starts with `postgresql://` or `postgres://`.
+
+Suggested migration order:
+
+1. Create a fresh PostgreSQL database.
+2. Start the backend once with `DATABASE_URL=...` so it creates tables.
+3. Stop writes briefly or schedule a maintenance window.
+4. Copy users/settings:
+
+   ```bash
+   python scripts/migrate_sqlite_to_postgres.py \
+     --sqlite /opt/restream/restream.db \
+     --postgres postgresql://restream:change_me@127.0.0.1:5432/restream
+   ```
+
+5. Start backend with `DATABASE_URL=...`.
+6. Verify login, stream settings, SRS webhooks, and admin panel.
+7. Keep the old SQLite backup until the new setup is stable.
+
+## Docker Compose staging stack
+
+The repository includes a staging Compose stack for backend, Next.js frontend,
+SRS, and PostgreSQL:
+
+```bash
+cp .env.example .env
+docker compose up -d --build
+```
+
+Services:
+
+```text
+backend   -> FastAPI on :8000
+frontend  -> Next.js on :3000
+srs       -> RTMP :1935 and HLS HTTP :8080
+postgres  -> PostgreSQL internal service
+```
+
+Use this first as a staging environment. The current manual/systemd production
+setup can keep running while you validate PostgreSQL and container deployment.
+
 ## HLS preview in the client cabinet
 
 The client dashboard renders a browser preview through HLS. Browsers cannot play

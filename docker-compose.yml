@@ -1,0 +1,67 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-restream}
+      POSTGRES_USER: ${POSTGRES_USER:-restream}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-restream} -d ${POSTGRES_DB:-restream}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://restream:change_me@postgres:5432/restream}
+      RESTREAM_BACKUP_DIR: /data/backups
+      RESTREAM_LOG_DIR: /data/logs
+      SRS_INPUT_URL_TEMPLATE: rtmp://srs/live/{stream_key}
+    volumes:
+      - backend-data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-}
+      NEXT_PUBLIC_OBS_SERVER_URL: ${NEXT_PUBLIC_OBS_SERVER_URL:-rtmp://restream.medialive.ru/live}
+      NEXT_PUBLIC_HLS_BASE_URL: ${NEXT_PUBLIC_HLS_BASE_URL:-https://restream.medialive.ru/srs/live}
+    depends_on:
+      - backend
+    ports:
+      - "3000:3000"
+
+  srs:
+    image: ossrs/srs:5
+    restart: unless-stopped
+    command: ./objs/srs -c conf/srs.conf
+    volumes:
+      - ./deploy/srs/srs.conf:/usr/local/srs/conf/srs.conf:ro
+    depends_on:
+      - backend
+    ports:
+      - "1935:1935"
+      - "8080:8080"
+
+volumes:
+  postgres-data:
+  backend-data:
