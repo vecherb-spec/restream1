@@ -773,6 +773,30 @@ def api_admin_streams(_admin: dict[str, Any] = Depends(get_current_admin)) -> di
     return active_streams()
 
 
+@app.post("/api/admin/streams/{stream_key}/stop")
+def api_admin_stop_stream(
+    stream_key: str,
+    _admin: dict[str, Any] = Depends(get_current_admin),
+) -> dict[str, Any]:
+    """Stop an active FFmpeg worker as admin."""
+
+    with process_lock:
+        active_publishers.pop(stream_key, None)
+    stopped = stop_process(stream_key)
+    return {"code": 0, "stream_key": stream_key, "stopped": stopped}
+
+
+@app.get("/api/admin/streams/{stream_key}/logs")
+def api_admin_stream_logs(
+    stream_key: str,
+    lines: int = 80,
+    _admin: dict[str, Any] = Depends(get_current_admin),
+) -> dict[str, Any]:
+    """Return latest FFmpeg log lines for an active or recent stream."""
+
+    return stream_logs(stream_key, lines=lines)
+
+
 @app.get("/api/admin/system-metrics")
 def api_admin_system_metrics(_admin: dict[str, Any] = Depends(get_current_admin)) -> dict[str, Any]:
     """Return server metrics for a future admin frontend."""

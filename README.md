@@ -1,10 +1,9 @@
 # restream1
 
-## Next.js frontend migration
+## Next.js frontend
 
-The repository now includes an experimental Next.js client frontend in
-`frontend/`. It uses the new FastAPI REST API under `/api/...` and can run in
-parallel with the existing Streamlit panel.
+The primary web UI lives in `frontend/`. It uses the FastAPI REST API under
+`/api/...` and replaces the earlier Streamlit MVP panel.
 
 Local development:
 
@@ -30,7 +29,7 @@ NEXT_PUBLIC_OBS_SERVER_URL=rtmp://restream.medialive.ru/live
 NEXT_PUBLIC_HLS_BASE_URL=https://restream.medialive.ru/srs/live
 ```
 
-## HLS preview in the Streamlit cabinet
+## HLS preview in the client cabinet
 
 The client dashboard renders a browser preview through HLS. Browsers cannot play
 RTMP directly, so SRS must expose HLS over HTTP/HTTPS.
@@ -44,9 +43,7 @@ https://restream.medialive.ru/srs/live/{stream_key}.m3u8
 You can override it with environment variables:
 
 ```bash
-RESTREAM_PREVIEW_HLS_BASE_URL=https://restream.medialive.ru/srs/live
-# or, for a fully custom shape:
-RESTREAM_PREVIEW_HLS_URL_TEMPLATE=https://restream.medialive.ru/srs/live/{stream_key}.m3u8
+NEXT_PUBLIC_HLS_BASE_URL=https://restream.medialive.ru/srs/live
 ```
 
 Example SRS fragments:

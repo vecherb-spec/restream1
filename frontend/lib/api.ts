@@ -51,6 +51,66 @@ export type RestreamSettings = {
   custom_key: string;
 };
 
+export type StreamProcess = {
+  stream_key: string;
+  pid?: number;
+  status?: string;
+  return_code?: number | null;
+  started_at?: string;
+  destinations?: number;
+  log_path?: string;
+  frame?: number;
+  fps?: number | null;
+  bitrate?: string;
+  speed?: string;
+  resolution?: string;
+  progress?: string;
+};
+
+export type StreamPublisher = {
+  stream_key: string;
+  published_at?: string;
+  destinations?: number;
+  ffmpeg_started?: boolean;
+};
+
+export type BackupInfo = {
+  path: string;
+  filename: string;
+  size_bytes: number;
+  created_at: string;
+};
+
+export type SystemMetrics = {
+  code: number;
+  timestamp: string;
+  cpu: {
+    cores: number;
+    load_1: number;
+    load_5: number;
+    load_15: number;
+    load_1_per_core: number;
+  };
+  memory: {
+    total_bytes?: number;
+    available_bytes?: number;
+    used_bytes?: number;
+    used_percent?: number;
+  };
+  disk: {
+    path: string;
+    total_bytes: number;
+    used_bytes: number;
+    free_bytes: number;
+    used_percent: number;
+  };
+  processes: {
+    ffmpeg_active: number;
+    publishers_active: number;
+  };
+  services: Record<string, boolean>;
+};
+
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") || "http://localhost:8000";
 
@@ -141,6 +201,81 @@ export async function updateSettings(token: string, settings: RestreamSettings) 
 
 export async function getStreamStatus(token: string) {
   return request<StreamStatus>("/api/me/stream-status", {}, token);
+}
+
+export async function getAdminUsers(token: string) {
+  return request<{ code: number; users: User[] }>("/api/admin/users", {}, token);
+}
+
+export async function setAdminUserActive(token: string, userId: number, isActive: boolean) {
+  return request<{ code: number; user: User }>(
+    `/api/admin/users/${userId}/active`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ is_active: isActive }),
+    },
+    token,
+  );
+}
+
+export async function resetAdminUserPassword(token: string, userId: number, newPassword: string) {
+  return request<{ code: number; message: string }>(
+    `/api/admin/users/${userId}/password`,
+    {
+      method: "POST",
+      body: JSON.stringify({ new_password: newPassword }),
+    },
+    token,
+  );
+}
+
+export async function resetAdminUserStreamKey(token: string, userId: number) {
+  return request<{ code: number; message: string; stream_key: string }>(
+    `/api/admin/users/${userId}/stream-key`,
+    { method: "POST" },
+    token,
+  );
+}
+
+export async function getAdminStreams(token: string) {
+  return request<{
+    code: number;
+    streams: StreamProcess[];
+    publishers: StreamPublisher[];
+    recent: StreamProcess[];
+  }>("/api/admin/streams", {}, token);
+}
+
+export async function stopAdminStream(token: string, streamKey: string) {
+  return request<{ code: number; stream_key: string; stopped: boolean }>(
+    `/api/admin/streams/${streamKey}/stop`,
+    { method: "POST" },
+    token,
+  );
+}
+
+export async function getAdminStreamLogs(token: string, streamKey: string) {
+  return request<{ code: number; lines: string[] }>(
+    `/api/admin/streams/${streamKey}/logs`,
+    {},
+    token,
+  );
+}
+
+export async function getAdminSystemMetrics(token: string) {
+  return request<SystemMetrics>("/api/admin/system-metrics", {}, token);
+}
+
+export async function getAdminBackups(token: string) {
+  return request<{ code: number; backups: BackupInfo[] }>("/api/admin/backups", {}, token);
+}
+
+export async function createAdminBackup(token: string) {
+  return request<{ code: number; backup: BackupInfo }>(
+    "/api/admin/backups",
+    { method: "POST" },
+    token,
+  );
 }
 
 export function userToSettings(user: User): RestreamSettings {

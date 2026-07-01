@@ -3,19 +3,32 @@
 import { useEffect, useMemo, useState } from "react";
 import { HlsPreview } from "@/components/HlsPreview";
 import {
+  BackupInfo,
   OBS_SERVER_URL,
   RestreamSettings,
+  StreamProcess,
+  StreamPublisher,
   StreamStatus,
+  SystemMetrics,
   User,
   clearToken,
+  createAdminBackup,
+  getAdminBackups,
+  getAdminStreamLogs,
+  getAdminStreams,
+  getAdminSystemMetrics,
+  getAdminUsers,
   getMe,
-  getSettings,
   getStreamStatus,
   getToken,
   login,
   logout,
   register,
+  resetAdminUserPassword,
+  resetAdminUserStreamKey,
+  setAdminUserActive,
   setToken,
+  stopAdminStream,
   updateSettings,
   userToSettings,
 } from "@/lib/api";
@@ -38,6 +51,20 @@ const emptySettings: RestreamSettings = {
   custom_url: "",
   custom_key: "",
 };
+
+function formatBytes(value?: number) {
+  if (value == null) {
+    return "-";
+  }
+  let size = value;
+  for (const unit of ["B", "KB", "MB", "GB", "TB"]) {
+    if (size < 1024 || unit === "TB") {
+      return unit === "B" ? `${Math.round(size)} B` : `${size.toFixed(1)} ${unit}`;
+    }
+    size /= 1024;
+  }
+  return `${size.toFixed(1)} TB`;
+}
 
 function Lamp({ color }: { color: StreamStatus["color"] }) {
   return <span className={`lamp ${color}`} aria-label={color} />;
@@ -333,6 +360,321 @@ function Dashboard({
   );
 }
 
+function AdminDashboard({
+  token,
+  user,
+  onLogout,
+}: {
+  token: string;
+  user: User;
+  onLogout: () => void;
+}) {
+  const [users, setUsers] = useState<User[]>([]);
+  const [metrics, setMetrics] = useState<SystemMetrics | null>(null);
+  const [streams, setStreams] = useState<StreamProcess[]>([]);
+  const [publishers, setPublishers] = useState<StreamPublisher[]>([]);
+  const [recent, setRecent] = useState<StreamProcess[]>([]);
+  const [backups, setBackups] = useState<BackupInfo[]>([]);
+  const [logLines, setLogLines] = useState<string[]>([]);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+
+  async function loadAdminData() {
+    try {
+      const [usersResponse, metricsResponse, streamsResponse, backupsResponse] = await Promise.all([
+        getAdminUsers(token),
+        getAdminSystemMetrics(token),
+        getAdminStreams(token),
+        getAdminBackups(token),
+      ]);
+      setUsers(usersResponse.users);
+      setMetrics(metricsResponse);
+      setStreams(streamsResponse.streams);
+      setPublishers(streamsResponse.publishers);
+      setRecent(streamsResponse.recent);
+      setBackups(backupsResponse.backups);
+      setError("");
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Ошибка загрузки админки");
+    }
+  }
+
+  useEffect(() => {
+    const initialLoadId = window.setTimeout(loadAdminData, 0);
+    const intervalId = window.setInterval(loadAdminData, 5000);
+    return () => {
+      window.clearTimeout(initialLoadId);
+      window.clearInterval(intervalId);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token]);
+
+  async function handleLogout() {
+    await logout(token).catch(() => undefined);
+    clearToken();
+    onLogout();
+  }
+
+  async function toggleUser(userId: number, isActive: boolean) {
+    await setAdminUserActive(token, userId, isActive);
+    setMessage(isActive ? "Пользователь разблокирован." : "Пользователь заблокирован.");
+    await loadAdminData();
+  }
+
+  async function resetPassword(userId: number) {
+    const newPassword = window.prompt("Новый пароль минимум 8 символов");
+    if (!newPassword) {
+      return;
+    }
+    await resetAdminUserPassword(token, userId, newPassword);
+    setMessage("Пароль обновлен.");
+  }
+
+  async function resetStreamKey(userId: number) {
+    if (!window.confirm("Сбросить stream key пользователя? Старый ключ перестанет работать.")) {
+      return;
+    }
+    const response = await resetAdminUserStreamKey(token, userId);
+    setMessage(`Новый stream key: ${response.stream_key}`);
+    await loadAdminData();
+  }
+
+  async function stopStream(streamKey: string) {
+    await stopAdminStream(token, streamKey);
+    setMessage("Эфир остановлен.");
+    await loadAdminData();
+  }
+
+  async function showLogs(streamKey: string) {
+    const response = await getAdminStreamLogs(token, streamKey);
+    setLogLines(response.lines || []);
+  }
+
+  async function createBackup() {
+    const response = await createAdminBackup(token);
+    setMessage(`Backup создан: ${response.backup.filename}`);
+    await loadAdminData();
+  }
+
+  return (
+    <div className="shell">
+      <header className="header">
+        <div>
+          <h1>Админка Restream</h1>
+          <p className="muted">Вы вошли как {user.username}. Данные обновляются каждые 5 секунд.</p>
+        </div>
+        <button className="button secondary" onClick={handleLogout}>
+          Выйти
+        </button>
+      </header>
+
+      {error && <div className="error">{error}</div>}
+      {message && <div className="alert">{message}</div>}
+
+      <div className="grid">
+        <div className="card">
+          <h2>CPU</h2>
+          <div className="metric">
+            Load/core
+            <strong>{metrics?.cpu.load_1_per_core ?? "-"}</strong>
+          </div>
+          <p className="muted">
+            Load: {metrics?.cpu.load_1 ?? "-"} / {metrics?.cpu.load_5 ?? "-"} /{" "}
+            {metrics?.cpu.load_15 ?? "-"}
+          </p>
+        </div>
+        <div className="card">
+          <h2>RAM</h2>
+          <div className="metric">
+            Used
+            <strong>{metrics?.memory.used_percent ?? "-"}%</strong>
+          </div>
+          <p className="muted">
+            {formatBytes(metrics?.memory.used_bytes)} / {formatBytes(metrics?.memory.total_bytes)}
+          </p>
+        </div>
+        <div className="card">
+          <h2>Disk</h2>
+          <div className="metric">
+            Used
+            <strong>{metrics?.disk.used_percent ?? "-"}%</strong>
+          </div>
+          <p className="muted">
+            {formatBytes(metrics?.disk.used_bytes)} / {formatBytes(metrics?.disk.total_bytes)}
+          </p>
+        </div>
+        <div className="card">
+          <h2>Services</h2>
+          <p>API: {metrics?.services.api ? "OK" : "FAIL"}</p>
+          <p>SRS RTMP: {metrics?.services.srs_rtmp_1935 ? "OK" : "FAIL"}</p>
+          <p>SRS HLS: {metrics?.services.srs_hls_8080 ? "OK" : "FAIL"}</p>
+        </div>
+      </div>
+
+      <div className="card" style={{ marginTop: 16 }}>
+        <h2>Backup SQLite</h2>
+        <button className="button" onClick={createBackup}>
+          Создать backup
+        </button>
+        <div className="table-wrap">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Файл</th>
+                <th>Размер</th>
+                <th>Создан</th>
+              </tr>
+            </thead>
+            <tbody>
+              {backups.map((backup) => (
+                <tr key={backup.path}>
+                  <td>{backup.filename}</td>
+                  <td>{formatBytes(backup.size_bytes)}</td>
+                  <td>{backup.created_at}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="card" style={{ marginTop: 16 }}>
+        <h2>Пользователи</h2>
+        <div className="table-wrap">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Логин</th>
+                <th>Email</th>
+                <th>Роль</th>
+                <th>Stream key</th>
+                <th>Активен</th>
+                <th>Действия</th>
+              </tr>
+            </thead>
+            <tbody>
+              {users.map((item) => {
+                const active = Boolean(item.is_active);
+                return (
+                  <tr key={item.id}>
+                    <td>{item.id}</td>
+                    <td>{item.username}</td>
+                    <td>{item.email}</td>
+                    <td>{item.role}</td>
+                    <td>{item.stream_key}</td>
+                    <td>{active ? "Да" : "Нет"}</td>
+                    <td>
+                      <div className="actions">
+                        <button className="button secondary" onClick={() => toggleUser(item.id, !active)}>
+                          {active ? "Заблокировать" : "Разблокировать"}
+                        </button>
+                        <button className="button secondary" onClick={() => resetPassword(item.id)}>
+                          Пароль
+                        </button>
+                        <button className="button secondary" onClick={() => resetStreamKey(item.id)}>
+                          Stream key
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="card" style={{ marginTop: 16 }}>
+        <h2>Входящие потоки SRS</h2>
+        <div className="table-wrap">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Stream key</th>
+                <th>Published</th>
+                <th>Площадок</th>
+                <th>FFmpeg</th>
+              </tr>
+            </thead>
+            <tbody>
+              {publishers.map((publisher) => (
+                <tr key={publisher.stream_key}>
+                  <td>{publisher.stream_key}</td>
+                  <td>{publisher.published_at || "-"}</td>
+                  <td>{publisher.destinations ?? 0}</td>
+                  <td>{publisher.ffmpeg_started ? "Да" : "Нет"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="card" style={{ marginTop: 16 }}>
+        <h2>FFmpeg процессы</h2>
+        <div className="table-wrap">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Stream key</th>
+                <th>PID</th>
+                <th>Status</th>
+                <th>Bitrate</th>
+                <th>FPS</th>
+                <th>Resolution</th>
+                <th>Действия</th>
+              </tr>
+            </thead>
+            <tbody>
+              {streams.map((stream) => (
+                <tr key={stream.stream_key}>
+                  <td>{stream.stream_key}</td>
+                  <td>{stream.pid ?? "-"}</td>
+                  <td>{stream.status ?? "-"}</td>
+                  <td>{stream.bitrate || "-"}</td>
+                  <td>{stream.fps ?? "-"}</td>
+                  <td>{stream.resolution || "-"}</td>
+                  <td>
+                    <div className="actions">
+                      <button className="button danger" onClick={() => stopStream(stream.stream_key)}>
+                        Stop
+                      </button>
+                      <button className="button secondary" onClick={() => showLogs(stream.stream_key)}>
+                        Logs
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <h3>Недавние завершения</h3>
+        <div className="table-wrap">
+          <table className="table">
+            <tbody>
+              {recent.map((stream) => (
+                <tr key={`${stream.stream_key}-${stream.started_at}`}>
+                  <td>{stream.stream_key}</td>
+                  <td>{stream.return_code ?? "-"}</td>
+                  <td>{stream.started_at || "-"}</td>
+                  <td>
+                    <button className="button secondary" onClick={() => showLogs(stream.stream_key)}>
+                      Logs
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {logLines.length > 0 && <pre className="log">{logLines.join("\n")}</pre>}
+      </div>
+    </div>
+  );
+}
+
 export default function Home() {
   const [token, setCurrentToken] = useState("");
   const [user, setUser] = useState<User | null>(null);
@@ -358,7 +700,16 @@ export default function Home() {
 
   return (
     <main className="page">
-      {token && user ? (
+      {token && user?.role === "admin" ? (
+        <AdminDashboard
+          token={token}
+          user={user}
+          onLogout={() => {
+            setCurrentToken("");
+            setUser(null);
+          }}
+        />
+      ) : token && user ? (
         <Dashboard
           token={token}
           user={user}
