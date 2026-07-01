@@ -17,6 +17,7 @@ import shutil
 import socket
 import subprocess
 import threading
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,7 @@ SRS_INPUT_URL_TEMPLATE = os.getenv(
     "rtmp://localhost/live/{stream_key}",
 )
 FFMPEG_BIN = os.getenv("FFMPEG_BIN", "ffmpeg")
+FFPROBE_BIN = os.getenv("FFPROBE_BIN", "ffprobe")
 LOG_DIR = Path(os.getenv("RESTREAM_LOG_DIR", "logs"))
 
 active_processes: dict[str, dict[str, Any]] = {}
@@ -179,8 +181,54 @@ def process_snapshot(stream_key: str, entry: dict[str, Any]) -> dict[str, Any]:
         "fps": progress["fps"],
         "bitrate": progress["bitrate"],
         "speed": progress["speed"],
+        "resolution": entry.get("resolution") or "",
         "progress": progress["progress"],
     }
+
+
+def probe_stream_resolution(stream_key: str, input_url: str) -> None:
+    """Probe the RTMP input once and store video resolution for status UI."""
+
+    try:
+        result = subprocess.run(
+            [
+                FFPROBE_BIN,
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height",
+                "-of",
+                "json",
+                input_url,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        logger.warning("Could not probe resolution for %s", stream_key)
+        return
+
+    try:
+        data = json.loads(result.stdout or "{}")
+        stream = (data.get("streams") or [{}])[0]
+        width = int(stream.get("width") or 0)
+        height = int(stream.get("height") or 0)
+    except (ValueError, TypeError, json.JSONDecodeError, IndexError):
+        width = height = 0
+
+    if not width or not height:
+        return
+
+    resolution = f"{width}x{height}"
+    with process_lock:
+        entry = active_processes.get(stream_key)
+        if entry:
+            entry["resolution"] = resolution
+    logger.info("Detected resolution for %s: %s", stream_key, resolution)
 
 
 def stream_status_payload(stream_key: str) -> dict[str, Any]:
@@ -233,6 +281,7 @@ def stream_status_payload(stream_key: str) -> dict[str, Any]:
         "fps": process.get("fps") if process else None,
         "bitrate": process.get("bitrate") if process else "",
         "speed": process.get("speed") if process else "",
+        "resolution": process.get("resolution") if process else "",
         "destinations": destinations,
     }
 
@@ -393,6 +442,7 @@ def start_ffmpeg(stream_key: str, destinations: list[str]) -> bool:
     # SRS may retry callbacks; ensure only one worker exists per stream key.
     stop_process(stream_key)
 
+    input_url = SRS_INPUT_URL_TEMPLATE.format(stream_key=stream_key)
     command = build_ffmpeg_command(stream_key, destinations)
     redacted_command = command[:]
     for index, value in enumerate(redacted_command):
@@ -417,12 +467,19 @@ def start_ffmpeg(stream_key: str, destinations: list[str]) -> bool:
             "started_at": utc_now_iso(),
             "destinations": len(destinations),
             "log_path": log_path,
+            "resolution": "",
         }
 
     threading.Thread(
         target=monitor_process,
         args=(stream_key, process),
         name=f"ffmpeg-monitor-{stream_key}",
+        daemon=True,
+    ).start()
+    threading.Thread(
+        target=probe_stream_resolution,
+        args=(stream_key, input_url),
+        name=f"ffprobe-resolution-{stream_key}",
         daemon=True,
     ).start()
     return True
