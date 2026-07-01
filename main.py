@@ -18,6 +18,7 @@ import socket
 import subprocess
 import threading
 import json
+import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -25,7 +26,7 @@ from typing import Any
 from fastapi import Cookie, Depends, Header, HTTPException, Request, Response
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from database import (
@@ -475,6 +476,15 @@ def stream_status_payload(stream_key: str) -> dict[str, Any]:
     }
 
 
+async def stream_status_events(request: Request, stream_key: str) -> Any:
+    """Yield stream status as Server-Sent Events until the client disconnects."""
+
+    while not await request.is_disconnected():
+        payload = stream_status_payload(stream_key)
+        yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        await asyncio.sleep(1)
+
+
 def read_memory_metrics() -> dict[str, Any]:
     """Read Linux memory metrics from /proc/meminfo."""
 
@@ -777,6 +787,23 @@ def api_my_stream_status(user: dict[str, Any] = Depends(get_current_api_user)) -
     """Return current user's stream status."""
 
     return stream_status_payload(user["stream_key"])
+
+
+@app.get("/api/me/stream-status/events")
+def api_my_stream_status_events(
+    request: Request,
+    user: dict[str, Any] = Depends(get_current_api_user),
+) -> StreamingResponse:
+    """Stream current user's status via Server-Sent Events."""
+
+    return StreamingResponse(
+        stream_status_events(request, user["stream_key"]),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/api/admin/users")

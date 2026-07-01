@@ -187,6 +187,10 @@ export async function getStreamStatus(token?: string) {
   return request<StreamStatus>("/api/me/stream-status", {}, token);
 }
 
+export function getStreamStatusEventsUrl() {
+  return `${API_BASE_URL}/api/me/stream-status/events`;
+}
+
 export async function getAdminUsers(token?: string) {
   return request<{ code: number; users: User[] }>("/api/admin/users", {}, token);
 }

@@ -19,6 +19,7 @@ import {
   getAdminUsers,
   getMe,
   getStreamStatus,
+  getStreamStatusEventsUrl,
   login,
   logout,
   register,
@@ -155,29 +156,62 @@ function AuthCard({ onAuthenticated }: { onAuthenticated: (user: User) => void }
 function StreamStatusCard() {
   const [status, setStatus] = useState<StreamStatus | null>(null);
   const [error, setError] = useState("");
+  const [transport, setTransport] = useState<"sse" | "fallback">("sse");
 
   useEffect(() => {
     let active = true;
+    let fallbackIntervalId: number | undefined;
 
-    async function loadStatus() {
-      try {
-        const nextStatus = await getStreamStatus();
+    getStreamStatus()
+      .then((nextStatus) => {
         if (active) {
           setStatus(nextStatus);
           setError("");
         }
-      } catch (requestError) {
+      })
+      .catch((requestError) => {
         if (active) {
           setError(requestError instanceof Error ? requestError.message : "Ошибка статуса");
         }
-      }
-    }
+      });
 
-    loadStatus();
-    const intervalId = window.setInterval(loadStatus, 1000);
+    const eventSource = new EventSource(getStreamStatusEventsUrl(), { withCredentials: true });
+    eventSource.onmessage = (event) => {
+      if (!active) {
+        return;
+      }
+      try {
+        setStatus(JSON.parse(event.data) as StreamStatus);
+        setTransport("sse");
+        setError("");
+      } catch {
+        setError("Некорректный SSE payload статуса");
+      }
+    };
+    eventSource.onerror = () => {
+      if (!active) {
+        return;
+      }
+      setTransport("fallback");
+      if (!fallbackIntervalId) {
+        fallbackIntervalId = window.setInterval(() => {
+          getStreamStatus()
+            .then((nextStatus) => {
+              if (active) {
+                setStatus(nextStatus);
+              }
+            })
+            .catch(() => undefined);
+        }, 3000);
+      }
+    };
+
     return () => {
       active = false;
-      window.clearInterval(intervalId);
+      eventSource.close();
+      if (fallbackIntervalId) {
+        window.clearInterval(fallbackIntervalId);
+      }
     };
   }, []);
 
@@ -195,7 +229,9 @@ function StreamStatusCard() {
         <Lamp color={status.color} />
         {status.label}
       </div>
-      <p className="muted">{status.message}</p>
+      <p className="muted">
+        {status.message} · обновление: {transport === "sse" ? "SSE live" : "fallback polling"}
+      </p>
       <div className="grid">
         <div className="metric">
           Bitrate

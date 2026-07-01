@@ -61,6 +61,18 @@ Clients cannot save more active destinations than their `max_destinations`.
 Admins can edit a user's plan and destination limit from the Next.js admin
 panel. The SRS webhook also enforces the limit when starting FFmpeg.
 
+## Live stream status
+
+The client dashboard uses Server-Sent Events:
+
+```text
+GET /api/me/stream-status/events
+```
+
+The endpoint streams the same payload as `/api/me/stream-status` once per
+second. The Next.js client falls back to slower polling if the SSE connection is
+temporarily unavailable.
+
 ## Database backends
 
 SQLite remains the default for an already-running single-server MVP:
