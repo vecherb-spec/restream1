@@ -13,6 +13,7 @@ import os
 import secrets
 import sqlite3
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,7 @@ DATABASE_PATH = Path(os.getenv("RESTREAM_DB_PATH", "restream.db"))
 DEFAULT_ADMIN_USERNAME = "admin"
 DEFAULT_ADMIN_PASSWORD = "admin_password_2026"
 YOUTUBE_RTMP_URL = "rtmp://a.rtmp.youtube.com/live2"
+AUTH_SESSION_DAYS = int(os.getenv("RESTREAM_AUTH_SESSION_DAYS", "7"))
 
 
 def get_connection() -> sqlite3.Connection:
@@ -83,6 +85,12 @@ def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return dict(row) if row is not None else None
 
 
+def utc_now_iso() -> str:
+    """Return current UTC time in a SQLite-friendly ISO format."""
+
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
 def init_db() -> None:
     """Create the schema and seed the default administrator account."""
 
@@ -114,6 +122,22 @@ def init_db() -> None:
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS auth_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                token_hash TEXT NOT NULL UNIQUE,
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            "DELETE FROM auth_sessions WHERE expires_at <= ?",
+            (utc_now_iso(),),
         )
 
         admin = connection.execute(
@@ -184,6 +208,70 @@ def authenticate_user(username: str, password: str) -> dict[str, Any] | None:
     if user and user["is_active"] and verify_password(password, user["password"]):
         return user
     return None
+
+
+def hash_session_token(token: str) -> str:
+    """Hash a session token before storing or querying it."""
+
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def create_auth_session(user_id: int) -> str:
+    """Create a persistent web session and return the raw token for the browser."""
+
+    token = secrets.token_urlsafe(32)
+    expires_at = (
+        datetime.now(timezone.utc) + timedelta(days=AUTH_SESSION_DAYS)
+    ).isoformat(timespec="seconds")
+
+    with get_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO auth_sessions (user_id, token_hash, expires_at)
+            VALUES (?, ?, ?)
+            """,
+            (user_id, hash_session_token(token), expires_at),
+        )
+    return token
+
+
+def get_user_by_session_token(token: str) -> dict[str, Any] | None:
+    """Resolve a valid non-expired session token to an active user."""
+
+    if not token:
+        return None
+
+    with get_connection() as connection:
+        connection.execute(
+            "DELETE FROM auth_sessions WHERE expires_at <= ?",
+            (utc_now_iso(),),
+        )
+        row = connection.execute(
+            """
+            SELECT users.*
+            FROM auth_sessions
+            JOIN users ON users.id = auth_sessions.user_id
+            WHERE auth_sessions.token_hash = ?
+              AND auth_sessions.expires_at > ?
+              AND users.is_active = 1
+            """,
+            (hash_session_token(token), utc_now_iso()),
+        ).fetchone()
+
+    return row_to_dict(row)
+
+
+def delete_auth_session(token: str) -> None:
+    """Delete a persistent web session."""
+
+    if not token:
+        return
+
+    with get_connection() as connection:
+        connection.execute(
+            "DELETE FROM auth_sessions WHERE token_hash = ?",
+            (hash_session_token(token),),
+        )
 
 
 def get_user_by_id(user_id: int) -> dict[str, Any] | None:

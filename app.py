@@ -22,7 +22,10 @@ import streamlit.components.v1 as components
 from database import (
     YOUTUBE_RTMP_URL,
     authenticate_user,
+    create_auth_session,
     create_user,
+    delete_auth_session,
+    get_user_by_session_token,
     get_user_by_id,
     init_db,
     list_users,
@@ -56,10 +59,62 @@ def set_logged_in_user(user: dict[str, Any]) -> None:
     st.session_state["authenticated"] = True
 
 
+def get_query_session_token() -> str:
+    """Return the auth session token from URL query parameters."""
+
+    token = st.query_params.get("session", "")
+    if isinstance(token, list):
+        return token[0] if token else ""
+    return str(token or "")
+
+
+def clear_query_session_token() -> None:
+    """Remove the session token from the page URL."""
+
+    try:
+        del st.query_params["session"]
+    except KeyError:
+        pass
+
+
+def start_persistent_session(user: dict[str, Any]) -> None:
+    """Create a persistent session and store its token in the page URL."""
+
+    token = create_auth_session(int(user["id"]))
+    st.session_state["session_token"] = token
+    st.query_params["session"] = token
+    set_logged_in_user(user)
+
+
+def restore_session_from_query() -> bool:
+    """Restore Streamlit session state after a browser refresh."""
+
+    if st.session_state.get("authenticated"):
+        return True
+
+    token = get_query_session_token()
+    if not token:
+        return False
+
+    user = get_user_by_session_token(token)
+    if user is None:
+        clear_query_session_token()
+        return False
+
+    st.session_state["session_token"] = token
+    set_logged_in_user(user)
+    return True
+
+
 def logout() -> None:
     """Clear all authentication-related state."""
 
-    for key in ("user", "role", "authenticated"):
+    token = st.session_state.get("session_token") or get_query_session_token()
+    if token:
+        delete_auth_session(str(token))
+    clear_query_session_token()
+
+    for key in ("user", "role", "authenticated", "session_token"):
         st.session_state.pop(key, None)
     st.rerun()
 
@@ -266,7 +321,7 @@ def render_auth_page() -> None:
             if user is None:
                 st.error("Неверный логин/пароль или аккаунт заблокирован.")
             else:
-                set_logged_in_user(user)
+                start_persistent_session(user)
                 st.success("Вход выполнен.")
                 st.rerun()
 
@@ -291,7 +346,7 @@ def render_auth_page() -> None:
             if not success or user is None:
                 st.error(message)
             else:
-                set_logged_in_user(user)
+                start_persistent_session(user)
                 st.success("Регистрация завершена. Вы вошли в личный кабинет.")
                 st.rerun()
 
@@ -645,6 +700,7 @@ def main() -> None:
 
     init_db()
     st.set_page_config(page_title="Restream MediaLive", page_icon="🎥", layout="wide")
+    restore_session_from_query()
 
     if not st.session_state.get("authenticated"):
         render_auth_page()
