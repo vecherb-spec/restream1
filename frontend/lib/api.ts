@@ -211,9 +211,9 @@ export async function updateStreamTitle(streamTitle: string, token?: string) {
 }
 
 export async function resetMyStreamKey(token?: string) {
-  return request<{ code: number; message: string; stream_key: string; user: User }>(
+  return request<{ code: number; message: string; stream_key: string; user?: User }>(
     "/api/me/stream-key",
-    { method: "PUT" },
+    { method: "POST" },
     token,
   );
 }

@@ -519,7 +519,7 @@ function BroadcastMain({
     setResettingStreamKey(true);
     try {
       const response = await resetMyStreamKey();
-      onUserChange(response.user);
+      onUserChange(response.user || { ...user, stream_key: response.stream_key });
       setCopied("new-key");
     } catch (requestError) {
       window.alert(requestError instanceof Error ? requestError.message : "Не удалось сгенерировать ключ");
