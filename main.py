@@ -911,11 +911,14 @@ def api_reset_my_stream_key(user: dict[str, Any] = Depends(get_current_api_user)
     success, message, stream_key = regenerate_user_stream_key(int(user["id"]))
     if not success:
         raise HTTPException(status_code=400, detail=message)
+    fresh_user = get_user_by_id(int(user["id"]))
+    if fresh_user is None or fresh_user.get("stream_key") != stream_key:
+        raise HTTPException(status_code=500, detail="Stream key was generated but account refresh failed")
     return {
         "code": 0,
         "message": message,
         "stream_key": stream_key,
-        "user": public_user(get_user_by_id(int(user["id"]))),
+        "user": public_user(fresh_user),
     }
 
 
