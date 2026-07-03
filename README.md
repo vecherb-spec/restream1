@@ -161,12 +161,43 @@ postgres  -> PostgreSQL internal service
 Use this first as a staging environment. The current manual/systemd production
 setup can keep running while you validate PostgreSQL and container deployment.
 
+## Production deploy
+
+Full deploy on the server:
+
+```bash
+chmod +x deploy/scripts/*.sh
+RESTREAM_REPO_DIR=/opt/restream RESTREAM_DEPLOY_BRANCH=cursor/restream-mvp-3225 ./deploy/scripts/deploy.sh
+```
+
+One-time systemd setup:
+
+```bash
+./deploy/scripts/install_systemd.sh
+```
+
+Required backend secrets in `/opt/restream/.env`:
+
+```bash
+RESTREAM_ADMIN_USERNAME=admin
+RESTREAM_ADMIN_PASSWORD=strong_password_here
+RESTREAM_SRS_WEBHOOK_SECRET=long_random_secret
+RESTREAM_SRS_TRUSTED_IPS=127.0.0.1,::1
+```
+
+`RESTREAM_ADMIN_PASSWORD` is used only when the admin user does not exist yet.
+Change the default admin password after the first deploy if the database was
+created earlier.
+
 ## Production healthchecks and backups
 
 Scripts for a systemd-based production host live in `deploy/scripts/`:
 
 ```bash
 chmod +x deploy/scripts/*.sh
+
+# Full deploy: git pull, build frontend, restart services
+deploy/scripts/deploy.sh
 
 # Check API, frontend, SRS, and optional systemd units
 deploy/scripts/healthcheck.sh
@@ -227,8 +258,8 @@ http_server {
 vhost __defaultVhost__ {
     http_hooks {
         enabled         on;
-        on_publish      http://127.0.0.1:8000/on_publish;
-        on_unpublish    http://127.0.0.1:8000/on_unpublish;
+        on_publish      http://127.0.0.1:8000/on_publish?token=YOUR_SRS_WEBHOOK_SECRET;
+        on_unpublish    http://127.0.0.1:8000/on_unpublish?token=YOUR_SRS_WEBHOOK_SECRET;
     }
 
     hls {

@@ -4,8 +4,8 @@ Run locally:
     uvicorn main:app --host 0.0.0.0 --port 8000
 
 SRS should call:
-    POST http://127.0.0.1:8000/on_publish
-    POST http://127.0.0.1:8000/on_unpublish
+    POST http://127.0.0.1:8000/on_publish?token=YOUR_SRS_WEBHOOK_SECRET
+    POST http://127.0.0.1:8000/on_unpublish?token=YOUR_SRS_WEBHOOK_SECRET
 """
 
 from __future__ import annotations
@@ -32,6 +32,7 @@ except ImportError:
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
 import re
+import secrets
 import shutil
 import socket
 import smtplib
@@ -125,6 +126,12 @@ SMTP_FROM = os.getenv("RESTREAM_SMTP_FROM", SMTP_USERNAME or "no-reply@restream.
 SMTP_USE_TLS = os.getenv("RESTREAM_SMTP_TLS", "true").lower() == "true"
 SMTP_USE_SSL = os.getenv("RESTREAM_SMTP_SSL", "false").lower() == "true" or SMTP_PORT == 465
 SMTP_TIMEOUT = int(os.getenv("RESTREAM_SMTP_TIMEOUT", "20"))
+SRS_WEBHOOK_SECRET = os.getenv("RESTREAM_SRS_WEBHOOK_SECRET", "").strip()
+SRS_TRUSTED_IPS = {
+    ip.strip()
+    for ip in os.getenv("RESTREAM_SRS_TRUSTED_IPS", "127.0.0.1,::1").split(",")
+    if ip.strip()
+}
 
 active_processes: dict[str, dict[str, Any]] = {}
 active_publishers: dict[str, dict[str, Any]] = {}
@@ -268,6 +275,33 @@ def get_current_admin(user: dict[str, Any] = Depends(get_current_api_user)) -> d
     if user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin role is required")
     return user
+
+
+def get_request_client_ip(request: Request) -> str:
+    """Return the best-effort client IP for webhook access checks."""
+
+    forwarded = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+    if forwarded:
+        return forwarded
+    return request.client.host if request.client else ""
+
+
+def verify_srs_webhook(request: Request) -> None:
+    """Allow SRS hooks only from trusted hosts or with a shared secret."""
+
+    client_ip = get_request_client_ip(request)
+    if client_ip in SRS_TRUSTED_IPS:
+        return
+
+    if SRS_WEBHOOK_SECRET:
+        provided = request.headers.get("X-Restream-Webhook-Secret", "")
+        if not provided:
+            provided = request.query_params.get("token", "")
+        if provided and secrets.compare_digest(provided, SRS_WEBHOOK_SECRET):
+            return
+
+    logger.warning("Rejected SRS webhook from %s", client_ip)
+    raise HTTPException(status_code=403, detail="SRS webhook is not allowed")
 
 
 def model_to_dict(model: BaseModel, exclude_unset: bool = False) -> dict[str, Any]:
@@ -1411,76 +1445,11 @@ def health() -> dict[str, Any]:
     return {"status": "ok", "active_streams": active_count}
 
 
-@app.get("/system_metrics")
-def system_metrics() -> dict[str, Any]:
-    """Expose lightweight server metrics for the admin dashboard."""
-
-    return system_metrics_payload()
-
-
-@app.get("/active_streams")
-def active_streams() -> dict[str, Any]:
-    """Expose active stream keys for the Streamlit admin panel."""
-
-    with process_lock:
-        streams = [process_snapshot(key, entry) for key, entry in active_processes.items()]
-        publishers = [
-            {"stream_key": key, **value}
-            for key, value in active_publishers.items()
-        ]
-        recent = recent_processes[:20]
-    return {"code": 0, "streams": streams, "publishers": publishers, "recent": recent}
-
-
-@app.get("/stream_status/{stream_key}")
-def stream_status(stream_key: str) -> dict[str, Any]:
-    """Expose client-facing live status for one stream key."""
-
-    return stream_status_payload(stream_key)
-
-
-@app.get("/stream_logs/{stream_key}")
-def stream_logs(stream_key: str, lines: int = 80) -> dict[str, Any]:
-    """Return the latest FFmpeg log lines for an active stream."""
-
-    with process_lock:
-        entry = active_processes.get(stream_key)
-        recent_entry = next(
-            (item for item in recent_processes if item.get("stream_key") == stream_key),
-            None,
-        )
-
-    log_path = entry.get("log_path") if entry else None
-    if log_path is None and recent_entry:
-        log_path = recent_entry.get("log_path")
-    if log_path is None:
-        log_path = find_latest_log_path_for_stream(stream_key)
-
-    if log_path is None:
-        return {"code": 1, "message": "stream log was not found", "lines": []}
-
-    lines_payload = tail_log_file(log_path, lines=lines)
-    return {
-        "code": 0,
-        "stream_key": stream_key,
-        "log_path": str(log_path or ""),
-        "lines": lines_payload,
-        "message": "" if lines_payload else "stream log is empty",
-    }
-
-
-@app.post("/stop_stream/{stream_key}")
-def stop_stream(stream_key: str) -> dict[str, Any]:
-    """Allow the admin panel to stop a FFmpeg worker without waiting for SRS."""
-
-    stopped = stop_process(stream_key)
-    return {"code": 0, "stream_key": stream_key, "stopped": stopped}
-
-
 @app.post("/on_publish")
 async def on_publish(request: Request) -> JSONResponse:
     """Authorize SRS publishing and start FFmpeg fan-out for enabled platforms."""
 
+    verify_srs_webhook(request)
     payload = await parse_srs_payload(request)
     stream_key = extract_stream_key(payload)
     if not stream_key:
@@ -1532,6 +1501,7 @@ async def on_publish(request: Request) -> JSONResponse:
 async def on_unpublish(request: Request) -> JSONResponse:
     """Stop the FFmpeg process when SRS reports stream unpublish."""
 
+    verify_srs_webhook(request)
     payload = await parse_srs_payload(request)
     stream_key = extract_stream_key(payload)
     if not stream_key:

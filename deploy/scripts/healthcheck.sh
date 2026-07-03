@@ -18,23 +18,6 @@ check_http() {
   return 1
 }
 
-check_password_reset_api() {
-  local base_url="${1%/}"
-  local response
-  local status
-  status="$(curl -sS --max-time 5 -o /tmp/restream-forgot.json -w "%{http_code}" \
-    -X POST "$base_url/api/auth/forgot-password" \
-    -H "Content-Type: application/json" \
-    -d '{"identifier":"healthcheck"}')"
-  if [[ "$status" == "200" ]] && grep -q '"code":0' /tmp/restream-forgot.json; then
-    echo "[OK] Password reset API"
-    return 0
-  fi
-  echo "[FAIL] Password reset API ($base_url/api/auth/forgot-password -> HTTP $status)"
-  cat /tmp/restream-forgot.json 2>/dev/null || true
-  return 1
-}
-
 check_tcp() {
   local name="$1"
   local host="$2"
@@ -49,9 +32,7 @@ check_tcp() {
 
 failed=0
 
-API_BASE_URL="${RESTREAM_API_BASE_URL:-${API_URL%/health}}"
 check_http "FastAPI health" "$API_URL" || failed=1
-check_password_reset_api "$API_BASE_URL" || failed=1
 check_http "Next.js frontend" "$FRONTEND_URL" || failed=1
 check_tcp "SRS RTMP" "$SRS_RTMP_HOST" "$SRS_RTMP_PORT" || failed=1
 check_tcp "SRS HLS" "$SRS_RTMP_HOST" "$SRS_HLS_PORT" || failed=1

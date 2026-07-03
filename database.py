@@ -9,6 +9,7 @@ native convention.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import secrets
 import shutil
@@ -41,13 +42,15 @@ DATABASE_BACKEND = "postgres" if DATABASE_URL.startswith(("postgresql://", "post
 DATABASE_PATH = Path(os.getenv("RESTREAM_DB_PATH", "restream.db"))
 BACKUP_DIR = Path(os.getenv("RESTREAM_BACKUP_DIR", "backups"))
 
-DEFAULT_ADMIN_USERNAME = "admin"
-DEFAULT_ADMIN_PASSWORD = "admin_password_2026"
+DEFAULT_ADMIN_USERNAME = os.getenv("RESTREAM_ADMIN_USERNAME", "admin").strip() or "admin"
+DEFAULT_ADMIN_PASSWORD = os.getenv("RESTREAM_ADMIN_PASSWORD", "").strip()
 YOUTUBE_RTMP_URL = "rtmp://a.rtmp.youtube.com/live2"
 AUTH_SESSION_DAYS = int(os.getenv("RESTREAM_AUTH_SESSION_DAYS", "7"))
 DEFAULT_CLIENT_PLAN = os.getenv("RESTREAM_DEFAULT_CLIENT_PLAN", "free")
 DEFAULT_MAX_DESTINATIONS = int(os.getenv("RESTREAM_DEFAULT_MAX_DESTINATIONS", "1"))
 ADMIN_MAX_DESTINATIONS = int(os.getenv("RESTREAM_ADMIN_MAX_DESTINATIONS", "99"))
+
+logger = logging.getLogger("restream.database")
 
 
 def normalize_database_url(url: str) -> str:
@@ -289,23 +292,30 @@ def init_db() -> None:
             (DEFAULT_ADMIN_USERNAME,),
         ).fetchone()
         if admin is None:
-            connection.execute(
-                """
-                INSERT INTO users (
-                    username, password, email, role, plan, max_destinations, stream_key, is_active
+            if len(DEFAULT_ADMIN_PASSWORD) < 8:
+                logger.warning(
+                    "Admin user is missing. Set RESTREAM_ADMIN_PASSWORD in .env "
+                    "(at least 8 characters) and restart backend to create it."
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, 1)
-                """,
-                (
-                    DEFAULT_ADMIN_USERNAME,
-                    hash_password(DEFAULT_ADMIN_PASSWORD),
-                    "admin@restream.medialive.ru",
-                    "admin",
-                    "admin",
-                    ADMIN_MAX_DESTINATIONS,
-                    generate_stream_key(DEFAULT_ADMIN_USERNAME),
-                ),
-            )
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO users (
+                        username, password, email, role, plan, max_destinations, stream_key, is_active
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+                    """,
+                    (
+                        DEFAULT_ADMIN_USERNAME,
+                        hash_password(DEFAULT_ADMIN_PASSWORD),
+                        os.getenv("RESTREAM_ADMIN_EMAIL", "admin@restream.medialive.ru").strip(),
+                        "admin",
+                        "admin",
+                        ADMIN_MAX_DESTINATIONS,
+                        generate_stream_key(DEFAULT_ADMIN_USERNAME),
+                    ),
+                )
+                logger.info("Created admin user %s from RESTREAM_ADMIN_PASSWORD", DEFAULT_ADMIN_USERNAME)
         connection.execute(
             """
             UPDATE users

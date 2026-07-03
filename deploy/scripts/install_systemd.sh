@@ -22,7 +22,6 @@ systemctl restart restream-backend restream-frontend
 systemctl --no-pager --full status restream-backend restream-frontend
 
 echo
-echo "Check password reset API:"
-curl -sS -X POST http://127.0.0.1:8000/api/auth/forgot-password \
-  -H "Content-Type: application/json" \
-  -d '{"identifier":"healthcheck"}'
+curl -fsS http://127.0.0.1:8000/health
+echo
+echo "Systemd services installed."
