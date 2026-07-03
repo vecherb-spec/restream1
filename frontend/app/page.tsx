@@ -471,6 +471,7 @@ function BroadcastMain({
   const [showStreamKey, setShowStreamKey] = useState(false);
   const [clientLogLines, setClientLogLines] = useState<string[]>([]);
   const [clientLogError, setClientLogError] = useState("");
+  const [clientLogInfo, setClientLogInfo] = useState("");
   const [loadingClientLogs, setLoadingClientLogs] = useState(false);
   const isOnAir = Boolean(status?.publisher || status?.process?.status === "running");
   const statusLabel = displayStatusLabel(status?.label);
@@ -530,12 +531,21 @@ function BroadcastMain({
   async function loadClientLogs() {
     setLoadingClientLogs(true);
     setClientLogError("");
+    setClientLogInfo("");
     try {
-      const response = await getMyStreamLogs();
+      const response = await getMyStreamLogs(user.stream_key);
       setClientLogLines(response.lines || []);
+      if (response.code !== 0 || !response.lines?.length) {
+        setClientLogInfo("Лог рестрима пока не создан. Запустите площадку, затем попробуйте снова.");
+      }
     } catch (requestError) {
       setClientLogLines([]);
-      setClientLogError(requestError instanceof Error ? requestError.message : "Логи рестрима пока не найдены");
+      const message = requestError instanceof Error ? requestError.message : "Логи рестрима пока не найдены";
+      if (message.toLowerCase().includes("not found") || message.includes("404")) {
+        setClientLogInfo("Лог рестрима пока не создан. Запустите площадку, затем попробуйте снова.");
+      } else {
+        setClientLogError(message);
+      }
     } finally {
       setLoadingClientLogs(false);
     }
@@ -673,8 +683,9 @@ function BroadcastMain({
           </button>
         </div>
         {clientLogError && <div className="error">{clientLogError}</div>}
+        {clientLogInfo && <div className="alert">{clientLogInfo}</div>}
         {clientLogLines.length > 0 && <pre className="log">{clientLogLines.join("\n")}</pre>}
-        {!clientLogError && clientLogLines.length === 0 && (
+        {!clientLogError && !clientLogInfo && clientLogLines.length === 0 && (
           <p className="muted">Нажмите кнопку, чтобы посмотреть последние строки FFmpeg-лога.</p>
         )}
       </div>

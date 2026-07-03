@@ -222,8 +222,20 @@ export async function getStreamStatus(token?: string) {
   return request<StreamStatus>("/api/me/stream-status", {}, token);
 }
 
-export async function getMyStreamLogs(token?: string) {
-  return request<{ code: number; lines: string[] }>("/api/me/stream-logs", {}, token);
+export async function getMyStreamLogs(streamKey: string, token?: string) {
+  try {
+    return await request<{ code: number; message?: string; lines: string[] }>("/api/me/stream-logs", {}, token);
+  } catch (error) {
+    const message = error instanceof Error ? error.message.toLowerCase() : "";
+    if (!message.includes("not found") && !message.includes("404")) {
+      throw error;
+    }
+    return request<{ code: number; message?: string; lines: string[] }>(
+      `/stream_logs/${encodeURIComponent(streamKey)}`,
+      {},
+      token,
+    );
+  }
 }
 
 export function getStreamStatusEventsUrl() {
