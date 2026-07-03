@@ -115,20 +115,21 @@ class RegisterPayload(BaseModel):
 
 
 class RestreamSettingsPayload(BaseModel):
-    yt_active: bool = False
-    yt_key: str = ""
-    vk_active: bool = False
-    vk_url: str = ""
-    vk_key: str = ""
-    rt_active: bool = False
-    rt_url: str = ""
-    rt_key: str = ""
-    tg_active: bool = False
-    tg_url: str = ""
-    tg_key: str = ""
-    custom_active: bool = False
-    custom_url: str = ""
-    custom_key: str = ""
+    yt_active: bool | None = None
+    yt_key: str | None = None
+    vk_active: bool | None = None
+    vk_url: str | None = None
+    vk_key: str | None = None
+    rt_active: bool | None = None
+    rt_url: str | None = None
+    rt_key: str | None = None
+    tg_active: bool | None = None
+    tg_url: str | None = None
+    tg_key: str | None = None
+    custom_active: bool | None = None
+    custom_url: str | None = None
+    custom_key: str | None = None
+    stream_title: str | None = None
 
 
 class PasswordChangePayload(BaseModel):
@@ -231,12 +232,12 @@ def get_current_admin(user: dict[str, Any] = Depends(get_current_api_user)) -> d
     return user
 
 
-def model_to_dict(model: BaseModel) -> dict[str, Any]:
+def model_to_dict(model: BaseModel, exclude_unset: bool = False) -> dict[str, Any]:
     """Return model data for both Pydantic v1 and v2."""
 
     if hasattr(model, "model_dump"):
-        return model.model_dump()
-    return model.dict()
+        return model.model_dump(exclude_unset=exclude_unset)
+    return model.dict(exclude_unset=exclude_unset)
 
 
 def build_pending_user_settings(user: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
@@ -1000,14 +1001,23 @@ def api_update_my_settings(
 ) -> dict[str, Any]:
     """Update current user's restream settings."""
 
-    settings = model_to_dict(payload)
-    pending_user = build_pending_user_settings(user, settings)
-    allowed, message = validate_destination_limit(pending_user)
-    if not allowed:
-        raise HTTPException(status_code=400, detail=message)
-    update_restream_settings(int(user["id"]), settings)
+    settings = model_to_dict(payload, exclude_unset=True)
+    stream_title = settings.pop("stream_title", None)
+
+    if settings:
+        pending_user = build_pending_user_settings(user, settings)
+        allowed, message = validate_destination_limit(pending_user)
+        if not allowed:
+            raise HTTPException(status_code=400, detail=message)
+        update_restream_settings(int(user["id"]), settings)
+
+    if stream_title is not None:
+        success, message = update_stream_title(int(user["id"]), stream_title)
+        if not success:
+            raise HTTPException(status_code=400, detail=message)
+
     fresh_user = get_user_by_id(int(user["id"]))
-    ffmpeg_started = sync_live_restream_worker(fresh_user) if fresh_user else False
+    ffmpeg_started = sync_live_restream_worker(fresh_user) if fresh_user and settings else False
     return {"code": 0, "user": public_user(fresh_user), "ffmpeg_started": ffmpeg_started}
 
 
