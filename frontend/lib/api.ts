@@ -34,6 +34,9 @@ export type StreamStatus = {
   bitrate: string;
   resolution: string;
   destinations: number;
+  publisher?: StreamPublisher | null;
+  process?: StreamProcess | null;
+  recent?: StreamProcess | null;
 };
 
 export type RestreamSettings = {
@@ -182,7 +185,7 @@ export async function getSettings(token?: string) {
 }
 
 export async function updateSettings(settings: RestreamSettings, token?: string) {
-  return request<{ code: number; user: User }>(
+  return request<{ code: number; user: User; ffmpeg_started?: boolean }>(
     "/api/me/settings",
     {
       method: "PUT",

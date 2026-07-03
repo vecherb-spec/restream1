@@ -708,6 +708,35 @@ def start_ffmpeg(stream_key: str, destinations: list[str]) -> bool:
     return True
 
 
+def sync_live_restream_worker(user: dict[str, Any]) -> bool:
+    """Apply updated destination settings to a currently published stream."""
+
+    stream_key = str(user.get("stream_key") or "")
+    if not stream_key:
+        return False
+
+    with process_lock:
+        publisher = active_publishers.get(stream_key)
+
+    if publisher is None:
+        return False
+
+    destinations = get_enabled_destinations(user)
+    if destinations:
+        started = start_ffmpeg(stream_key, destinations)
+    else:
+        stop_process(stream_key)
+        started = False
+
+    with process_lock:
+        current_publisher = active_publishers.get(stream_key)
+        if current_publisher is not None:
+            current_publisher["destinations"] = len(destinations)
+            current_publisher["ffmpeg_started"] = started
+
+    return started
+
+
 @app.post("/api/auth/login")
 def api_login(payload: LoginPayload, response: Response) -> dict[str, Any]:
     """Authenticate a user for the future web frontend."""
@@ -773,7 +802,8 @@ def api_update_my_settings(
         raise HTTPException(status_code=400, detail=message)
     update_restream_settings(int(user["id"]), settings)
     fresh_user = get_user_by_id(int(user["id"]))
-    return {"code": 0, "user": public_user(fresh_user)}
+    ffmpeg_started = sync_live_restream_worker(fresh_user) if fresh_user else False
+    return {"code": 0, "user": public_user(fresh_user), "ffmpeg_started": ffmpeg_started}
 
 
 @app.post("/api/me/password")

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { HlsPreview } from "@/components/HlsPreview";
 import {
   AdminLiveDashboard,
@@ -35,6 +35,37 @@ import {
 } from "@/lib/api";
 
 type AuthMode = "login" | "register";
+type StreamTransport = "sse" | "fallback";
+type PlatformId = "yt" | "vk" | "rt" | "tg" | "custom";
+
+type PlatformConfig = {
+  id: PlatformId;
+  title: string;
+  activeKey: keyof RestreamSettings;
+  streamKey: keyof RestreamSettings;
+  urlKey?: keyof RestreamSettings;
+  fixedUrl?: string;
+};
+
+const platformConfigs: PlatformConfig[] = [
+  {
+    id: "yt",
+    title: "YouTube",
+    activeKey: "yt_active",
+    streamKey: "yt_key",
+    fixedUrl: "rtmp://a.rtmp.youtube.com/live2",
+  },
+  { id: "vk", title: "VK", activeKey: "vk_active", urlKey: "vk_url", streamKey: "vk_key" },
+  { id: "rt", title: "Rutube", activeKey: "rt_active", urlKey: "rt_url", streamKey: "rt_key" },
+  { id: "tg", title: "Telegram", activeKey: "tg_active", urlKey: "tg_url", streamKey: "tg_key" },
+  {
+    id: "custom",
+    title: "Custom RTMP",
+    activeKey: "custom_active",
+    urlKey: "custom_url",
+    streamKey: "custom_key",
+  },
+];
 
 const emptySettings: RestreamSettings = {
   yt_active: false,
@@ -71,6 +102,71 @@ function Lamp({ color }: { color: StreamStatus["color"] }) {
   return <span className={`lamp ${color}`} aria-label={color} />;
 }
 
+function useStreamStatus() {
+  const [status, setStatus] = useState<StreamStatus | null>(null);
+  const [error, setError] = useState("");
+  const [transport, setTransport] = useState<StreamTransport>("sse");
+
+  useEffect(() => {
+    let active = true;
+    let fallbackIntervalId: number | undefined;
+
+    getStreamStatus()
+      .then((nextStatus) => {
+        if (active) {
+          setStatus(nextStatus);
+          setError("");
+        }
+      })
+      .catch((requestError) => {
+        if (active) {
+          setError(requestError instanceof Error ? requestError.message : "Ошибка статуса");
+        }
+      });
+
+    const eventSource = new EventSource(getStreamStatusEventsUrl(), { withCredentials: true });
+    eventSource.onmessage = (event) => {
+      if (!active) {
+        return;
+      }
+      try {
+        setStatus(JSON.parse(event.data) as StreamStatus);
+        setTransport("sse");
+        setError("");
+      } catch {
+        setError("Некорректный SSE payload статуса");
+      }
+    };
+    eventSource.onerror = () => {
+      if (!active) {
+        return;
+      }
+      setTransport("fallback");
+      if (!fallbackIntervalId) {
+        fallbackIntervalId = window.setInterval(() => {
+          getStreamStatus()
+            .then((nextStatus) => {
+              if (active) {
+                setStatus(nextStatus);
+              }
+            })
+            .catch(() => undefined);
+        }, 3000);
+      }
+    };
+
+    return () => {
+      active = false;
+      eventSource.close();
+      if (fallbackIntervalId) {
+        window.clearInterval(fallbackIntervalId);
+      }
+    };
+  }, []);
+
+  return { status, error, transport };
+}
+
 function countEnabledDestinations(settings: RestreamSettings) {
   let count = 0;
   if (settings.yt_active && settings.yt_key.trim()) count += 1;
@@ -79,6 +175,12 @@ function countEnabledDestinations(settings: RestreamSettings) {
   if (settings.tg_active && settings.tg_url.trim() && settings.tg_key.trim()) count += 1;
   if (settings.custom_active && settings.custom_url.trim() && settings.custom_key.trim()) count += 1;
   return count;
+}
+
+function isPlatformConfigured(platform: PlatformConfig, settings: RestreamSettings) {
+  const streamKey = String(settings[platform.streamKey] || "").trim();
+  const url = platform.fixedUrl || (platform.urlKey ? String(settings[platform.urlKey] || "").trim() : "");
+  return Boolean(streamKey && url);
 }
 
 function AuthCard({ onAuthenticated }: { onAuthenticated: (user: User) => void }) {
@@ -155,68 +257,15 @@ function AuthCard({ onAuthenticated }: { onAuthenticated: (user: User) => void }
   );
 }
 
-function StreamStatusCard() {
-  const [status, setStatus] = useState<StreamStatus | null>(null);
-  const [error, setError] = useState("");
-  const [transport, setTransport] = useState<"sse" | "fallback">("sse");
-
-  useEffect(() => {
-    let active = true;
-    let fallbackIntervalId: number | undefined;
-
-    getStreamStatus()
-      .then((nextStatus) => {
-        if (active) {
-          setStatus(nextStatus);
-          setError("");
-        }
-      })
-      .catch((requestError) => {
-        if (active) {
-          setError(requestError instanceof Error ? requestError.message : "Ошибка статуса");
-        }
-      });
-
-    const eventSource = new EventSource(getStreamStatusEventsUrl(), { withCredentials: true });
-    eventSource.onmessage = (event) => {
-      if (!active) {
-        return;
-      }
-      try {
-        setStatus(JSON.parse(event.data) as StreamStatus);
-        setTransport("sse");
-        setError("");
-      } catch {
-        setError("Некорректный SSE payload статуса");
-      }
-    };
-    eventSource.onerror = () => {
-      if (!active) {
-        return;
-      }
-      setTransport("fallback");
-      if (!fallbackIntervalId) {
-        fallbackIntervalId = window.setInterval(() => {
-          getStreamStatus()
-            .then((nextStatus) => {
-              if (active) {
-                setStatus(nextStatus);
-              }
-            })
-            .catch(() => undefined);
-        }, 3000);
-      }
-    };
-
-    return () => {
-      active = false;
-      eventSource.close();
-      if (fallbackIntervalId) {
-        window.clearInterval(fallbackIntervalId);
-      }
-    };
-  }, []);
-
+function StreamStatusCard({
+  status,
+  error,
+  transport,
+}: {
+  status: StreamStatus | null;
+  error: string;
+  transport: StreamTransport;
+}) {
   if (error) {
     return <div className="error">{error}</div>;
   }
@@ -258,106 +307,115 @@ function StreamStatusCard() {
 
 function SettingsForm({
   user,
+  streamStatus,
   onSaved,
 }: {
   user: User;
+  streamStatus: StreamStatus | null;
   onSaved: (user: User) => void;
 }) {
   const [settings, setSettings] = useState<RestreamSettings>(() => userToSettings(user));
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [savingPlatform, setSavingPlatform] = useState<PlatformId | null>(null);
   const enabledDestinations = countEnabledDestinations(settings);
   const maxDestinations = user.max_destinations ?? 1;
-
-  const platforms = useMemo(
-    () => [
-      { prefix: "vk", title: "VK" },
-      { prefix: "rt", title: "Rutube" },
-      { prefix: "tg", title: "Telegram" },
-      { prefix: "custom", title: "Custom RTMP" },
-    ],
-    [],
+  const streamIsOnAir = Boolean(
+    streamStatus?.publisher || streamStatus?.process?.status === "running",
   );
 
-  function update<K extends keyof RestreamSettings>(key: K, value: RestreamSettings[K]) {
+  function updateText(key: keyof RestreamSettings, value: string) {
     setSettings((current) => ({ ...current, [key]: value }));
   }
 
-  async function save(event: React.FormEvent) {
-    event.preventDefault();
+  async function togglePlatform(platform: PlatformConfig, nextActive: boolean) {
     setError("");
     setMessage("");
+    const nextSettings = {
+      ...settings,
+      [platform.activeKey]: nextActive,
+    };
+
+    if (nextActive && !isPlatformConfigured(platform, nextSettings)) {
+      setError(`${platform.title}: заполните RTMP URL и stream key.`);
+      return;
+    }
+
+    if (nextActive && !settings[platform.activeKey] && countEnabledDestinations(nextSettings) > maxDestinations) {
+      setError(`Тариф разрешает ${maxDestinations} активных площадок.`);
+      return;
+    }
+
+    const previousSettings = settings;
+    setSettings(nextSettings);
+    setSavingPlatform(platform.id);
     try {
-      const response = await updateSettings(settings);
+      const response = await updateSettings(nextSettings);
       onSaved(response.user);
-      setMessage("Настройки сохранены. Перезапустите эфир в OBS.");
+      setMessage(`${platform.title}: ${nextActive ? "Start выполнен" : "Stop выполнен"}.`);
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "Не удалось сохранить");
+      setSettings(previousSettings);
+      setError(requestError instanceof Error ? requestError.message : "Не удалось переключить площадку");
+    } finally {
+      setSavingPlatform(null);
     }
   }
 
   return (
-    <form className="card" onSubmit={save}>
+    <div className="card">
       <h2>Площадки рестрима</h2>
-      <div className="alert">После сохранения настроек остановите и заново запустите эфир в OBS.</div>
       <p className="muted">
-        Тариф `{user.plan || "free"}`: активно {enabledDestinations} из {maxDestinations} разрешенных площадок.
+        Тариф `{user.plan || "free"}`: включено {enabledDestinations} из {maxDestinations} разрешенных площадок.
+        Поля сохраняются сразу при нажатии Start/Stop.
       </p>
-      {enabledDestinations > maxDestinations && (
-        <div className="error">
-          Вы выбрали больше площадок, чем разрешено тарифом. Сохранение будет отклонено.
-        </div>
-      )}
 
-      <div className="settings-row">
-        <label>
-          <input
-            type="checkbox"
-            checked={settings.yt_active}
-            onChange={(event) => update("yt_active", event.target.checked)}
-          />{" "}
-          YouTube
-        </label>
-        <input value="rtmp://a.rtmp.youtube.com/live2" disabled />
-        <input
-          placeholder="YouTube stream key"
-          value={settings.yt_key}
-          onChange={(event) => update("yt_key", event.target.value)}
-        />
-      </div>
-
-      {platforms.map(({ prefix, title }) => {
-        const activeKey = `${prefix}_active` as keyof RestreamSettings;
-        const urlKey = `${prefix}_url` as keyof RestreamSettings;
-        const streamKey = `${prefix}_key` as keyof RestreamSettings;
+      {platformConfigs.map((platform) => {
+        const active = Boolean(settings[platform.activeKey]);
+        const configured = isPlatformConfigured(platform, settings);
+        const live = active && streamIsOnAir;
+        const startWouldExceedLimit =
+          !active &&
+          configured &&
+          countEnabledDestinations({ ...settings, [platform.activeKey]: true }) > maxDestinations;
+        const disabled = savingPlatform === platform.id || startWouldExceedLimit;
         return (
-          <div className="settings-row" key={prefix}>
-            <label>
-              <input
-                type="checkbox"
-                checked={Boolean(settings[activeKey])}
-                onChange={(event) => update(activeKey, event.target.checked)}
-              />{" "}
-              {title}
-            </label>
+          <div className={`platform-row ${live ? "live" : active ? "enabled" : ""}`} key={platform.id}>
+            <div className="platform-state">
+              <span className={`platform-live-dot ${live ? "live" : active ? "enabled" : ""}`} />
+              <div>
+                <strong>{platform.title}</strong>
+                <small>{live ? "В эфире" : active ? "Включена, ждет OBS" : "Остановлена"}</small>
+              </div>
+            </div>
             <input
               placeholder="RTMP URL"
-              value={String(settings[urlKey])}
-              onChange={(event) => update(urlKey, event.target.value)}
+              value={platform.fixedUrl || (platform.urlKey ? String(settings[platform.urlKey]) : "")}
+              disabled={Boolean(platform.fixedUrl)}
+              onChange={(event) => {
+                if (platform.urlKey) {
+                  updateText(platform.urlKey, event.target.value);
+                }
+              }}
             />
             <input
               placeholder="Stream key"
-              value={String(settings[streamKey])}
-              onChange={(event) => update(streamKey, event.target.value)}
+              value={String(settings[platform.streamKey])}
+              onChange={(event) => updateText(platform.streamKey, event.target.value)}
             />
+            <button
+              className={`button ${active ? "danger" : "secondary"}`}
+              disabled={disabled}
+              onClick={() => togglePlatform(platform, !active)}
+            >
+              {savingPlatform === platform.id ? "..." : active ? "Stop" : "Start"}
+            </button>
           </div>
         );
       })}
 
       {error && <div className="error">{error}</div>}
       {message && <div className="alert">{message}</div>}
-      <button className="button">Сохранить изменения</button>
-    </form>
+    </div>
   );
 }
 
@@ -370,6 +428,8 @@ function Dashboard({
   onLogout: () => void;
   onUserChange: (user: User) => void;
 }) {
+  const streamState = useStreamStatus();
+
   async function handleLogout() {
     await logout().catch(() => undefined);
     onLogout();
@@ -399,7 +459,7 @@ function Dashboard({
             {user.plan || "free"} · до {user.max_destinations ?? 1} активных площадок
           </strong>
         </div>
-        <StreamStatusCard />
+        <StreamStatusCard {...streamState} />
       </div>
 
       <div className="card" style={{ marginTop: 16 }}>
@@ -408,7 +468,7 @@ function Dashboard({
       </div>
 
       <div style={{ marginTop: 16 }}>
-        <SettingsForm user={user} onSaved={onUserChange} />
+        <SettingsForm user={user} streamStatus={streamState.status} onSaved={onUserChange} />
       </div>
     </div>
   );
