@@ -275,7 +275,7 @@ def extract_stream_key(payload: dict[str, Any]) -> str:
     """Extract stream key from SRS payload.
 
     SRS commonly sends {"stream": "key"}, but some setups include a leading
-    slash or a path-like value. The final segment is the OBS stream key.
+    slash or a path-like value. The final segment is the VideoCoder stream key.
     """
 
     raw_stream = str(payload.get("stream") or "").strip()
@@ -315,6 +315,30 @@ def find_latest_log_path_for_stream(stream_key: str) -> Path | None:
     candidates = [
         path
         for path in LOG_DIR.glob(f"ffmpeg_{safe_key}_*.log")
+        if path.is_file()
+    ]
+    if not candidates:
+        return None
+
+    try:
+        return max(candidates, key=lambda path: path.stat().st_mtime)
+    except OSError:
+        return None
+
+
+def find_latest_log_path_for_username(username: str) -> Path | None:
+    """Find the newest FFmpeg log for any stream key generated for a username."""
+
+    safe_username = "".join(
+        char.lower() if char.isalnum() else "_" for char in (username or "user")
+    ).strip("_")
+    safe_username = safe_username or "user"
+    if not LOG_DIR.exists() or not LOG_DIR.is_dir():
+        return None
+
+    candidates = [
+        path
+        for path in LOG_DIR.glob(f"ffmpeg_live_{safe_username}_*.log")
         if path.is_file()
     ]
     if not candidates:
@@ -498,7 +522,7 @@ def build_platform_statuses(
             reason = ""
         elif not publisher:
             state = "waiting_input"
-            label = "Ждет OBS"
+            label = "Ждет VideoCoder"
             color = "yellow"
             reason = "Входящий поток пока не опубликован в SRS."
         elif process_running:
@@ -608,7 +632,7 @@ def stream_status_payload(stream_key: str) -> dict[str, Any]:
     if not publisher:
         color = "red"
         label = "Нет входящего потока"
-        message = "OBS не публикует поток в SRS или SRS еще не прислал on_publish."
+        message = "VideoCoder не публикует поток в SRS или SRS еще не прислал on_publish."
     elif destinations == 0:
         color = "yellow"
         label = "Есть поток - рестрим не запущен"
@@ -1078,7 +1102,22 @@ def api_my_stream_logs(
 ) -> dict[str, Any]:
     """Return latest FFmpeg log lines for the current user's stream."""
 
-    return stream_logs(user["stream_key"], lines=lines)
+    response = stream_logs(user["stream_key"], lines=lines)
+    if response.get("code") == 0 and response.get("lines"):
+        return response
+
+    username_log_path = find_latest_log_path_for_username(str(user.get("username") or ""))
+    if username_log_path is None:
+        return response
+
+    lines_payload = tail_log_file(username_log_path, lines=lines)
+    return {
+        "code": 0 if lines_payload else 1,
+        "stream_key": user["stream_key"],
+        "log_path": str(username_log_path),
+        "lines": lines_payload,
+        "message": "" if lines_payload else "stream log is empty",
+    }
 
 
 @app.get("/api/admin/dashboard/events")

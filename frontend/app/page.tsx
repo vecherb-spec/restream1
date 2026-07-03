@@ -382,7 +382,7 @@ function SettingsForm({
               <span className={`platform-live-dot ${stateClass}`} />
               <div>
                 <strong>{platform.title}</strong>
-                <small>{platformStatus?.label || (live ? "В эфире" : active ? "Включена, ждет OBS" : "Остановлена")}</small>
+                <small>{platformStatus?.label || (live ? "В эфире" : active ? "Включена, ждет VideoCoder" : "Остановлена")}</small>
                 {platformStatus?.reason && <small className="platform-reason">{platformStatus.reason}</small>}
               </div>
             </div>
@@ -471,6 +471,7 @@ function BroadcastMain({
   const { status, transport } = streamState;
   const [copied, setCopied] = useState("");
   const [editingTitle, setEditingTitle] = useState(false);
+  const [displayTitle, setDisplayTitle] = useState(user.stream_title || "Название трансляции");
   const [draftTitle, setDraftTitle] = useState(user.stream_title || "Название трансляции");
   const [titleError, setTitleError] = useState("");
   const [savingTitle, setSavingTitle] = useState(false);
@@ -500,7 +501,9 @@ function BroadcastMain({
     setTitleError("");
     try {
       const response = await updateStreamTitle(nextTitle);
-      onUserChange(response.user);
+      setDisplayTitle(nextTitle);
+      setDraftTitle(nextTitle);
+      onUserChange({ ...response.user, stream_title: nextTitle });
       setEditingTitle(false);
     } catch (requestError) {
       setTitleError(requestError instanceof Error ? requestError.message : "Не удалось сохранить название");
@@ -510,14 +513,14 @@ function BroadcastMain({
   }
 
   function cancelTitleEdit() {
-    setDraftTitle(user.stream_title || "Название трансляции");
+    setDraftTitle(displayTitle);
     setTitleError("");
     setEditingTitle(false);
   }
 
   async function regenerateStreamKey() {
     const confirmed = window.confirm(
-      "Сгенерировать новый Stream Key? Старый ключ перестанет работать, текущий эфир будет остановлен. Новый ключ нужно будет вставить в OBS.",
+      "Сгенерировать новый Stream Key? Старый ключ перестанет работать, текущий эфир будет остановлен. Новый ключ нужно будет вставить в VideoCoder.",
     );
     if (!confirmed) {
       return;
@@ -546,13 +549,13 @@ function BroadcastMain({
       const response = await getMyStreamLogs(user.stream_key);
       setClientLogLines(response.lines || []);
       if (response.code !== 0 || !response.lines?.length) {
-        setClientLogInfo("Лог рестрима пока не создан. Запустите площадку, затем попробуйте снова.");
+      setClientLogInfo("Лог рестрима пока не создан. Запустите рестрим на площадку, затем попробуйте снова.");
       }
     } catch (requestError) {
       setClientLogLines([]);
       const message = requestError instanceof Error ? requestError.message : "Логи рестрима пока не найдены";
       if (message.toLowerCase().includes("not found") || message.includes("404")) {
-        setClientLogInfo("Лог рестрима пока не создан. Запустите площадку, затем попробуйте снова.");
+        setClientLogInfo("Лог рестрима пока не создан. Запустите рестрим на площадку, затем попробуйте снова.");
       } else {
         setClientLogError(message);
       }
@@ -593,7 +596,7 @@ function BroadcastMain({
               </div>
             ) : (
               <div className="broadcast-title-row">
-                <h1>{user.stream_title || "Название трансляции"}</h1>
+                <h1>{displayTitle}</h1>
                 <button
                   className="icon-button"
                   aria-label="Редактировать название трансляции"
@@ -614,11 +617,11 @@ function BroadcastMain({
             <div className="broadcast-empty">
               <div className="empty-orb">LIVE</div>
               <h2>Готово к запуску</h2>
-              <p>Добавьте каналы справа, скопируйте RTMP и ключ в OBS, затем начните трансляцию.</p>
+              <p>Добавьте каналы справа, скопируйте RTMP и ключ в VideoCoder, затем начните трансляцию.</p>
               <div className="quick-steps">
                 <span>1. Каналы</span>
                 <span>2. RTMP + ключ</span>
-                <span>3. OBS Start</span>
+                <span>3. VideoCoder Start</span>
               </div>
             </div>
           )}
@@ -651,7 +654,7 @@ function BroadcastMain({
       <div className="obs-compact-card">
         <div className="obs-row">
           <div>
-            <span>Server</span>
+            <span>VideoCoder Server</span>
             <strong>{OBS_SERVER_URL}</strong>
           </div>
           <button className="button secondary" onClick={() => copyValue("server", OBS_SERVER_URL)}>
@@ -677,7 +680,7 @@ function BroadcastMain({
         </div>
         {copied && (
           <small>
-            {copied === "new-key" ? "Новый Stream Key сгенерирован. Скопируйте его в OBS." : `Скопировано: ${copied}`}
+            {copied === "new-key" ? "Новый Stream Key сгенерирован. Скопируйте его в VideoCoder." : `Скопировано: ${copied}`}
           </small>
         )}
       </div>
@@ -686,10 +689,10 @@ function BroadcastMain({
         <div className="client-log-header">
           <div>
             <span className="eyebrow">Диагностика</span>
-            <h3>Ошибки рестрима</h3>
+            <h3>Логи рестрима</h3>
           </div>
           <button className="button secondary" disabled={loadingClientLogs} onClick={loadClientLogs}>
-            {loadingClientLogs ? "Загрузка..." : "Показать ошибки"}
+            {loadingClientLogs ? "Загрузка..." : "Показать логи"}
           </button>
         </div>
         {clientLogError && <div className="error">{clientLogError}</div>}
