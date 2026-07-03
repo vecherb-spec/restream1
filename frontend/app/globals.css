@@ -494,6 +494,13 @@ input {
   align-items: center;
 }
 
+.obs-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .obs-compact-card small {
   color: var(--muted);
 }
@@ -722,5 +729,9 @@ input {
 
   .obs-row {
     grid-template-columns: 1fr;
+  }
+
+  .obs-actions {
+    justify-content: flex-start;
   }
 }

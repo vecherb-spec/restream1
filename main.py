@@ -1085,6 +1085,7 @@ def api_update_my_stream_title(
 
 
 @app.post("/api/me/stream-key")
+@app.put("/api/me/stream-key")
 def api_reset_my_stream_key(user: dict[str, Any] = Depends(get_current_api_user)) -> dict[str, Any]:
     """Regenerate current user's stream key and stop old active worker."""
 
@@ -1094,7 +1095,12 @@ def api_reset_my_stream_key(user: dict[str, Any] = Depends(get_current_api_user)
     success, message, stream_key = regenerate_user_stream_key(int(user["id"]))
     if not success:
         raise HTTPException(status_code=400, detail=message)
-    return {"code": 0, "message": message, "stream_key": stream_key}
+    return {
+        "code": 0,
+        "message": message,
+        "stream_key": stream_key,
+        "user": public_user(get_user_by_id(int(user["id"]))),
+    }
 
 
 @app.get("/api/me/stream-status")

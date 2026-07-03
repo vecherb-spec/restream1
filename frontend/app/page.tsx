@@ -25,6 +25,7 @@ import {
   login,
   logout,
   register,
+  resetMyStreamKey,
   resetAdminUserPassword,
   resetAdminUserStreamKey,
   setAdminUserActive,
@@ -448,6 +449,7 @@ function BroadcastMain({
   const [draftTitle, setDraftTitle] = useState(user.stream_title || "Название трансляции");
   const [titleError, setTitleError] = useState("");
   const [savingTitle, setSavingTitle] = useState(false);
+  const [resettingStreamKey, setResettingStreamKey] = useState(false);
   const isOnAir = Boolean(status?.publisher || status?.process?.status === "running");
   const statusLabel = displayStatusLabel(status?.label);
 
@@ -481,6 +483,26 @@ function BroadcastMain({
     setDraftTitle(user.stream_title || "Название трансляции");
     setTitleError("");
     setEditingTitle(false);
+  }
+
+  async function regenerateStreamKey() {
+    const confirmed = window.confirm(
+      "Сгенерировать новый Stream Key? Старый ключ перестанет работать, текущий эфир будет остановлен. Новый ключ нужно будет вставить в OBS.",
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setResettingStreamKey(true);
+    try {
+      const response = await resetMyStreamKey();
+      onUserChange(response.user);
+      setCopied("new-key");
+    } catch (requestError) {
+      window.alert(requestError instanceof Error ? requestError.message : "Не удалось сгенерировать ключ");
+    } finally {
+      setResettingStreamKey(false);
+    }
   }
 
   return (
@@ -585,11 +607,20 @@ function BroadcastMain({
             <span>Stream Key</span>
             <strong>{user.stream_key}</strong>
           </div>
-          <button className="button secondary" onClick={() => copyValue("key", user.stream_key)}>
-            copy
-          </button>
+          <div className="obs-actions">
+            <button className="button secondary" onClick={() => copyValue("key", user.stream_key)}>
+              copy
+            </button>
+            <button className="button danger" disabled={resettingStreamKey} onClick={regenerateStreamKey}>
+              {resettingStreamKey ? "..." : "Новый ключ"}
+            </button>
+          </div>
         </div>
-        {copied && <small>Скопировано: {copied}</small>}
+        {copied && (
+          <small>
+            {copied === "new-key" ? "Новый Stream Key сгенерирован. Скопируйте его в OBS." : `Скопировано: ${copied}`}
+          </small>
+        )}
       </div>
     </section>
   );
