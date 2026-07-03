@@ -20,6 +20,7 @@ import {
   getAdminSystemMetrics,
   getAdminUsers,
   getMe,
+  getMyStreamLogs,
   getStreamStatus,
   getStreamStatusEventsUrl,
   login,
@@ -198,6 +199,23 @@ function displayStatusLabel(label?: string) {
   }
   return label;
 }
+
+function maskSecret(value: string) {
+  if (!value) {
+    return "";
+  }
+  if (value.length <= 8) {
+    return "••••••••";
+  }
+  return `${value.slice(0, 4)}••••••••${value.slice(-4)}`;
+}
+
+const planPresets = [
+  { plan: "free", maxDestinations: 1, title: "Free" },
+  { plan: "basic", maxDestinations: 3, title: "Basic" },
+  { plan: "pro", maxDestinations: 5, title: "Pro" },
+  { plan: "admin", maxDestinations: 99, title: "Admin" },
+] as const;
 
 function AuthCard({ onAuthenticated }: { onAuthenticated: (user: User) => void }) {
   const [mode, setMode] = useState<AuthMode>("login");
@@ -450,6 +468,10 @@ function BroadcastMain({
   const [titleError, setTitleError] = useState("");
   const [savingTitle, setSavingTitle] = useState(false);
   const [resettingStreamKey, setResettingStreamKey] = useState(false);
+  const [showStreamKey, setShowStreamKey] = useState(false);
+  const [clientLogLines, setClientLogLines] = useState<string[]>([]);
+  const [clientLogError, setClientLogError] = useState("");
+  const [loadingClientLogs, setLoadingClientLogs] = useState(false);
   const isOnAir = Boolean(status?.publisher || status?.process?.status === "running");
   const statusLabel = displayStatusLabel(status?.label);
 
@@ -502,6 +524,20 @@ function BroadcastMain({
       window.alert(requestError instanceof Error ? requestError.message : "Не удалось сгенерировать ключ");
     } finally {
       setResettingStreamKey(false);
+    }
+  }
+
+  async function loadClientLogs() {
+    setLoadingClientLogs(true);
+    setClientLogError("");
+    try {
+      const response = await getMyStreamLogs();
+      setClientLogLines(response.lines || []);
+    } catch (requestError) {
+      setClientLogLines([]);
+      setClientLogError(requestError instanceof Error ? requestError.message : "Логи рестрима пока не найдены");
+    } finally {
+      setLoadingClientLogs(false);
     }
   }
 
@@ -605,9 +641,12 @@ function BroadcastMain({
         <div className="obs-row">
           <div>
             <span>Stream Key</span>
-            <strong>{user.stream_key}</strong>
+            <strong>{showStreamKey ? user.stream_key : maskSecret(user.stream_key)}</strong>
           </div>
           <div className="obs-actions">
+            <button className="button secondary" onClick={() => setShowStreamKey((current) => !current)}>
+              {showStreamKey ? "Скрыть" : "Показать"}
+            </button>
             <button className="button secondary" onClick={() => copyValue("key", user.stream_key)}>
               copy
             </button>
@@ -620,6 +659,23 @@ function BroadcastMain({
           <small>
             {copied === "new-key" ? "Новый Stream Key сгенерирован. Скопируйте его в OBS." : `Скопировано: ${copied}`}
           </small>
+        )}
+      </div>
+
+      <div className="client-log-card">
+        <div className="client-log-header">
+          <div>
+            <span className="eyebrow">Диагностика</span>
+            <h3>Ошибки рестрима</h3>
+          </div>
+          <button className="button secondary" disabled={loadingClientLogs} onClick={loadClientLogs}>
+            {loadingClientLogs ? "Загрузка..." : "Показать ошибки"}
+          </button>
+        </div>
+        {clientLogError && <div className="error">{clientLogError}</div>}
+        {clientLogLines.length > 0 && <pre className="log">{clientLogLines.join("\n")}</pre>}
+        {!clientLogError && clientLogLines.length === 0 && (
+          <p className="muted">Нажмите кнопку, чтобы посмотреть последние строки FFmpeg-лога.</p>
         )}
       </div>
     </section>
@@ -778,22 +834,14 @@ function AdminDashboard({
     setMessage("Пароль обновлен.");
   }
 
-  async function updatePlan(userId: number) {
-    const plan = window.prompt("Название тарифа", "free");
-    if (!plan) {
+  async function applyPlanPreset(userId: number, presetPlan: string) {
+    const preset = planPresets.find((item) => item.plan === presetPlan);
+    if (!preset) {
+      setError("Неизвестный тариф.");
       return;
     }
-    const maxValue = window.prompt("Максимум активных площадок", "1");
-    if (maxValue == null) {
-      return;
-    }
-    const maxDestinations = Number.parseInt(maxValue, 10);
-    if (Number.isNaN(maxDestinations) || maxDestinations < 0) {
-      setError("Лимит площадок должен быть неотрицательным числом.");
-      return;
-    }
-    await updateAdminUserPlan(userId, plan, maxDestinations);
-    setMessage("Тариф обновлен.");
+    await updateAdminUserPlan(userId, preset.plan, preset.maxDestinations);
+    setMessage(`Тариф обновлен: ${preset.title}.`);
     await loadStaticAdminData();
   }
 
@@ -823,6 +871,10 @@ function AdminDashboard({
   }
 
   const backupTitle = databaseBackend === "postgres" ? "Backup PostgreSQL" : "Backup SQLite";
+  const activeUsersCount = users.filter((item) => Boolean(item.is_active)).length;
+  const clientUsersCount = users.filter((item) => item.role === "client").length;
+  const activePublishersCount = publishers.length;
+  const activeFfmpegCount = streams.length;
 
   return (
     <div className="shell">
@@ -841,6 +893,41 @@ function AdminDashboard({
 
       {error && <div className="error">{error}</div>}
       {message && <div className="alert">{message}</div>}
+
+      <div className="grid">
+        <div className="card">
+          <h2>Пользователи</h2>
+          <div className="metric">
+            Всего
+            <strong>{users.length}</strong>
+          </div>
+          <p className="muted">Клиентов: {clientUsersCount}</p>
+        </div>
+        <div className="card">
+          <h2>Активные</h2>
+          <div className="metric">
+            Accounts
+            <strong>{activeUsersCount}</strong>
+          </div>
+          <p className="muted">Заблокировано: {Math.max(users.length - activeUsersCount, 0)}</p>
+        </div>
+        <div className="card">
+          <h2>В эфире</h2>
+          <div className="metric">
+            SRS
+            <strong>{activePublishersCount}</strong>
+          </div>
+          <p className="muted">Входящие публикации сейчас</p>
+        </div>
+        <div className="card">
+          <h2>Рестрим</h2>
+          <div className="metric">
+            FFmpeg
+            <strong>{activeFfmpegCount}</strong>
+          </div>
+          <p className="muted">Активные процессы рестрима</p>
+        </div>
+      </div>
 
       <div className="grid">
         <div className="card">
@@ -935,7 +1022,19 @@ function AdminDashboard({
                     <td>{item.username}</td>
                     <td>{item.email}</td>
                     <td>{item.role}</td>
-                    <td>{item.plan || "free"}</td>
+                    <td>
+                      <select
+                        className="select"
+                        value={item.plan || "free"}
+                        onChange={(event) => applyPlanPreset(item.id, event.target.value)}
+                      >
+                        {planPresets.map((preset) => (
+                          <option key={preset.plan} value={preset.plan}>
+                            {preset.title} · {preset.maxDestinations}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
                     <td>{item.max_destinations ?? 1}</td>
                     <td>{item.stream_key}</td>
                     <td>{active ? "Да" : "Нет"}</td>
@@ -946,9 +1045,6 @@ function AdminDashboard({
                         </button>
                         <button className="button secondary" onClick={() => resetPassword(item.id)}>
                           Пароль
-                        </button>
-                        <button className="button secondary" onClick={() => updatePlan(item.id)}>
-                          Тариф
                         </button>
                         <button className="button secondary" onClick={() => resetStreamKey(item.id)}>
                           Stream key

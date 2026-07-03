@@ -922,6 +922,16 @@ def api_my_stream_status_events(
     )
 
 
+@app.get("/api/me/stream-logs")
+def api_my_stream_logs(
+    lines: int = 80,
+    user: dict[str, Any] = Depends(get_current_api_user),
+) -> dict[str, Any]:
+    """Return latest FFmpeg log lines for the current user's stream."""
+
+    return stream_logs(user["stream_key"], lines=lines)
+
+
 @app.get("/api/admin/dashboard/events")
 def api_admin_dashboard_events(
     request: Request,

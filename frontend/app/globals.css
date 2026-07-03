@@ -30,7 +30,8 @@ a {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -90,6 +91,15 @@ input {
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 12px;
+  background: #0e1528;
+  color: var(--text);
+}
+
+.select {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px;
   background: #0e1528;
   color: var(--text);
 }
@@ -503,6 +513,27 @@ input {
 
 .obs-compact-card small {
   color: var(--muted);
+}
+
+.client-log-card {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.035);
+  margin-top: 16px;
+  padding: 16px;
+  backdrop-filter: blur(14px);
+}
+
+.client-log-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.client-log-header h3 {
+  margin: 4px 0 0;
 }
 
 .channels-panel {
