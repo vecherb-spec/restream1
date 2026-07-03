@@ -411,6 +411,128 @@ def process_snapshot(stream_key: str, entry: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+PLATFORM_STATUS_CONFIGS = [
+    {
+        "id": "yt",
+        "title": "YouTube",
+        "active_field": "yt_active",
+        "key_field": "yt_key",
+        "url_field": None,
+        "fixed_url": True,
+    },
+    {
+        "id": "vk",
+        "title": "VK",
+        "active_field": "vk_active",
+        "key_field": "vk_key",
+        "url_field": "vk_url",
+        "fixed_url": False,
+    },
+    {
+        "id": "rt",
+        "title": "Rutube",
+        "active_field": "rt_active",
+        "key_field": "rt_key",
+        "url_field": "rt_url",
+        "fixed_url": False,
+    },
+    {
+        "id": "tg",
+        "title": "Telegram",
+        "active_field": "tg_active",
+        "key_field": "tg_key",
+        "url_field": "tg_url",
+        "fixed_url": False,
+    },
+    {
+        "id": "custom",
+        "title": "Custom RTMP",
+        "active_field": "custom_active",
+        "key_field": "custom_key",
+        "url_field": "custom_url",
+        "fixed_url": False,
+    },
+]
+
+
+def platform_configured(user: dict[str, Any], config: dict[str, Any]) -> bool:
+    """Return whether a platform has enough data to build a restream destination."""
+
+    has_key = bool(str(user.get(config["key_field"]) or "").strip())
+    if config.get("fixed_url"):
+        return has_key
+    url_field = config.get("url_field")
+    has_url = bool(str(user.get(url_field) or "").strip()) if url_field else False
+    return has_key and has_url
+
+
+def build_platform_statuses(
+    user: dict[str, Any] | None,
+    publisher: dict[str, Any] | None,
+    process: dict[str, Any] | None,
+    recent: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Build client-facing per-platform status labels."""
+
+    if user is None:
+        return []
+
+    process_running = bool(process and process.get("status") == "running")
+    process_exited = bool(process and process.get("status") == "exited")
+    recent_failed = bool(recent and recent.get("return_code") not in {None, 0})
+
+    statuses: list[dict[str, Any]] = []
+    for config in PLATFORM_STATUS_CONFIGS:
+        active = bool(user.get(config["active_field"]))
+        configured = platform_configured(user, config)
+
+        if not configured:
+            state = "not_configured"
+            label = "Не настроена"
+            color = "red" if active else "gray"
+            reason = "Заполните RTMP URL и stream key." if active else ""
+        elif not active:
+            state = "stopped"
+            label = "Остановлена"
+            color = "gray"
+            reason = ""
+        elif not publisher:
+            state = "waiting_input"
+            label = "Ждет OBS"
+            color = "yellow"
+            reason = "Входящий поток пока не опубликован в SRS."
+        elif process_running:
+            state = "live"
+            label = "В эфире"
+            color = "green"
+            reason = ""
+        elif process_exited or recent_failed:
+            state = "error"
+            label = "Ошибка"
+            color = "red"
+            reason = "FFmpeg завершился. Откройте ошибки рестрима."
+        else:
+            state = "starting"
+            label = "Запускается"
+            color = "yellow"
+            reason = "FFmpeg еще не отдал статус."
+
+        statuses.append(
+            {
+                "id": config["id"],
+                "title": config["title"],
+                "active": active,
+                "configured": configured,
+                "state": state,
+                "label": label,
+                "color": color,
+                "reason": reason,
+            }
+        )
+
+    return statuses
+
+
 def probe_stream_resolution(stream_key: str, input_url: str) -> None:
     """Probe the RTMP input once and store video resolution for status UI."""
 
@@ -459,6 +581,7 @@ def probe_stream_resolution(stream_key: str, input_url: str) -> None:
 def stream_status_payload(stream_key: str) -> dict[str, Any]:
     """Build the client-facing stream status payload."""
 
+    user = get_active_user_by_stream_key(stream_key)
     with process_lock:
         publisher = active_publishers.get(stream_key)
         process_entry = active_processes.get(stream_key)
@@ -469,6 +592,7 @@ def stream_status_payload(stream_key: str) -> dict[str, Any]:
 
     process = process_snapshot(stream_key, process_entry) if process_entry else None
     recent = recent_entry if recent_entry else None
+    platform_statuses = build_platform_statuses(user, publisher, process, recent)
     destinations = 0
     if publisher:
         destinations = int(publisher.get("destinations") or 0)
@@ -514,6 +638,7 @@ def stream_status_payload(stream_key: str) -> dict[str, Any]:
         "resolution": resolution,
         "dropped_frames": dropped_frames,
         "destinations": destinations,
+        "platform_statuses": platform_statuses,
     }
 
 

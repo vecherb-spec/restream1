@@ -39,6 +39,18 @@ export type StreamStatus = {
   publisher?: StreamPublisher | null;
   process?: StreamProcess | null;
   recent?: StreamProcess | null;
+  platform_statuses?: PlatformStatus[];
+};
+
+export type PlatformStatus = {
+  id: string;
+  title: string;
+  active: boolean;
+  configured: boolean;
+  state: "not_configured" | "stopped" | "waiting_input" | "live" | "error" | "starting";
+  label: string;
+  color: "gray" | "red" | "yellow" | "green";
+  reason?: string;
 };
 
 export type RestreamSettings = {

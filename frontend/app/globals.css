@@ -640,6 +640,10 @@ select {
   font-size: 12px;
 }
 
+.platform-reason {
+  color: #ffb4c0 !important;
+}
+
 .platform-live-dot {
   width: 14px;
   height: 14px;
@@ -648,12 +652,31 @@ select {
   display: inline-block;
 }
 
+.platform-live-dot.gray {
+  background: #55617a;
+}
+
 .platform-live-dot.enabled {
   background: var(--warning);
   box-shadow: 0 0 16px rgba(247, 201, 72, 0.55);
 }
 
+.platform-live-dot.yellow {
+  background: var(--warning);
+  box-shadow: 0 0 16px rgba(247, 201, 72, 0.55);
+}
+
 .platform-live-dot.live {
+  background: var(--danger);
+  box-shadow: 0 0 18px rgba(255, 92, 122, 0.9);
+}
+
+.platform-live-dot.green {
+  background: var(--success);
+  box-shadow: 0 0 18px rgba(51, 209, 122, 0.72);
+}
+
+.platform-live-dot.red {
   background: var(--danger);
   box-shadow: 0 0 18px rgba(255, 92, 122, 0.9);
 }

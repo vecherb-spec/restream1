@@ -200,6 +200,10 @@ function displayStatusLabel(label?: string) {
   return label;
 }
 
+function getPlatformStatus(status: StreamStatus | null, platformId: PlatformId) {
+  return status?.platform_statuses?.find((item) => item.id === platformId);
+}
+
 function maskSecret(value: string) {
   if (!value) {
     return "";
@@ -364,7 +368,9 @@ function SettingsForm({
       {platformConfigs.map((platform) => {
         const active = Boolean(settings[platform.activeKey]);
         const configured = isPlatformConfigured(platform, settings);
-        const live = active && streamIsOnAir;
+        const platformStatus = getPlatformStatus(streamStatus, platform.id);
+        const live = platformStatus?.state === "live" || (active && streamIsOnAir);
+        const stateClass = live ? "live" : platformStatus?.color || (active ? "yellow" : "gray");
         const startWouldExceedLimit =
           !active &&
           configured &&
@@ -373,10 +379,11 @@ function SettingsForm({
         return (
           <div className={`platform-row ${live ? "live" : active ? "enabled" : ""}`} key={platform.id}>
             <div className="platform-state">
-              <span className={`platform-live-dot ${live ? "live" : active ? "enabled" : ""}`} />
+              <span className={`platform-live-dot ${stateClass}`} />
               <div>
                 <strong>{platform.title}</strong>
-                <small>{live ? "В эфире" : active ? "Включена, ждет OBS" : "Остановлена"}</small>
+                <small>{platformStatus?.label || (live ? "В эфире" : active ? "Включена, ждет OBS" : "Остановлена")}</small>
+                {platformStatus?.reason && <small className="platform-reason">{platformStatus.reason}</small>}
               </div>
             </div>
             <input
