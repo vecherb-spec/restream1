@@ -384,47 +384,44 @@ function SettingsForm({
   );
 }
 
-function ClientSidebar({
+function BroadcastTopbar({
   user,
+  streamState,
   onLogout,
 }: {
   user: User;
+  streamState: ReturnType<typeof useStreamStatus>;
   onLogout: () => void;
 }) {
-  const menu = ["Главная", "Планировщик", "Мои видео", "Транскодинг", "Аналитика", "Настройки"];
+  const { status } = streamState;
 
   return (
-    <aside className="client-sidebar">
-      <div className="brand">
+    <header className="broadcast-topbar">
+      <div className="broadcast-brand">
         <span className="brand-mark">M</span>
         <strong>MediaLive</strong>
       </div>
-      <div className="account-card">
+      <div className="broadcast-status-pill">
+        <Lamp color={status?.color || "red"} />
+        <span>{status?.label || "Офлайн"}</span>
+      </div>
+      <div className="broadcast-user">
         <div className="avatar">{user.username.slice(0, 1).toUpperCase()}</div>
         <div>
           <strong>{user.username}</strong>
-          <small>Личный проект</small>
+          <small>
+            {user.plan || "free"} · до {user.max_destinations ?? 1} каналов
+          </small>
         </div>
+        <button className="button secondary" onClick={onLogout}>
+          Выйти
+        </button>
       </div>
-      <div className="plan-card">
-        <span>{user.plan || "free"}</span>
-        <small>до {user.max_destinations ?? 1} каналов</small>
-      </div>
-      <nav className="sidebar-nav">
-        {menu.map((item, index) => (
-          <button className={index === 0 ? "active" : ""} key={item}>
-            {item}
-          </button>
-        ))}
-      </nav>
-      <button className="sidebar-logout" onClick={onLogout}>
-        Выйти
-      </button>
-    </aside>
+    </header>
   );
 }
 
-function StreamWorkspace({
+function BroadcastMain({
   user,
   streamState,
 }: {
@@ -432,70 +429,84 @@ function StreamWorkspace({
   streamState: ReturnType<typeof useStreamStatus>;
 }) {
   const { status, error, transport } = streamState;
+  const [copied, setCopied] = useState("");
   const isOnAir = Boolean(status?.publisher || status?.process?.status === "running");
 
+  async function copyValue(label: string, value: string) {
+    await navigator.clipboard?.writeText(value);
+    setCopied(label);
+    window.setTimeout(() => setCopied(""), 1800);
+  }
+
   return (
-    <section className="studio-main">
-      <div className="stream-card">
-        <div className="stream-card-header">
-          <div className="stream-state">
-            <Lamp color={status?.color || "red"} />
-            <strong>{status?.label || "Офлайн"}</strong>
+    <section className="broadcast-main">
+      <div className="broadcast-preview-card">
+        <div className="broadcast-preview-header">
+          <div>
+            <span className="eyebrow">Главная трансляция</span>
+            <h1>Название трансляции</h1>
           </div>
-          <div className="rtmp-pill">RTMP и ключ</div>
+          <div className="transport-chip">{transport === "sse" ? "SSE live" : "fallback"}</div>
         </div>
-        <div className={`stream-preview ${isOnAir ? "on-air" : ""}`}>
+        <div className={`broadcast-preview ${isOnAir ? "on-air" : ""}`}>
           {isOnAir ? (
             <HlsPreview streamKey={user.stream_key} />
           ) : (
-            <div className="start-guide">
-              <h2>С чего начать?</h2>
-              <p>Несколько шагов для запуска restream</p>
-              <button>1. Добавьте каналы справа</button>
-              <button>2. Скопируйте RTMP и ключ</button>
-              <button>3. Начните трансляцию в OBS</button>
+            <div className="broadcast-empty">
+              <div className="empty-orb">LIVE</div>
+              <h2>Готово к запуску</h2>
+              <p>Добавьте каналы справа, скопируйте RTMP и ключ в OBS, затем начните трансляцию.</p>
+              <div className="quick-steps">
+                <span>1. Каналы</span>
+                <span>2. RTMP + ключ</span>
+                <span>3. OBS Start</span>
+              </div>
             </div>
           )}
         </div>
       </div>
 
-      <div className="stream-meta">
-        <button className="title-chip">Название и описание</button>
-        <div>
-          <h1>Название трансляции</h1>
-          <p className="muted">{status?.message || error || "Ожидаем статус трансляции."}</p>
-        </div>
-      </div>
+      <p className="broadcast-message">{status?.message || error || "Ожидаем статус трансляции."}</p>
 
-      <div className="metrics-strip">
-        <div>
+      <div className="broadcast-metrics">
+        <div className="broadcast-metric-card">
           <span>Статус</span>
           <strong>{status?.label || "Офлайн"}</strong>
         </div>
-        <div>
+        <div className="broadcast-metric-card">
           <span>Разрешение</span>
           <strong>{metricValue(status?.resolution)}</strong>
         </div>
-        <div>
+        <div className="broadcast-metric-card">
           <span>Битрейт</span>
           <strong>{metricValue(status?.bitrate)}</strong>
         </div>
-        <div>
+        <div className="broadcast-metric-card">
           <span>FPS</span>
           <strong>{status?.fps == null ? "-" : status.fps.toFixed(1)}</strong>
         </div>
       </div>
 
-      <div className="obs-card">
-        <div>
-          <span>Server</span>
-          <strong>{OBS_SERVER_URL}</strong>
+      <div className="obs-compact-card">
+        <div className="obs-row">
+          <div>
+            <span>Server</span>
+            <strong>{OBS_SERVER_URL}</strong>
+          </div>
+          <button className="button secondary" onClick={() => copyValue("server", OBS_SERVER_URL)}>
+            copy
+          </button>
         </div>
-        <div>
-          <span>Stream Key</span>
-          <strong>{user.stream_key}</strong>
+        <div className="obs-row">
+          <div>
+            <span>Stream Key</span>
+            <strong>{user.stream_key}</strong>
+          </div>
+          <button className="button secondary" onClick={() => copyValue("key", user.stream_key)}>
+            copy
+          </button>
         </div>
-        <small>Статус обновляется через {transport === "sse" ? "SSE live" : "fallback polling"}.</small>
+        {copied && <small>Скопировано: {copied}</small>}
       </div>
     </section>
   );
@@ -518,10 +529,10 @@ function Dashboard({
   }
 
   return (
-    <div className="client-shell">
-      <ClientSidebar user={user} onLogout={handleLogout} />
-      <StreamWorkspace user={user} streamState={streamState} />
-      <div className="client-channels">
+    <div className="broadcast-shell">
+      <BroadcastTopbar user={user} streamState={streamState} onLogout={handleLogout} />
+      <div className="broadcast-layout">
+        <BroadcastMain user={user} streamState={streamState} />
         <SettingsForm user={user} streamStatus={streamState.status} onSaved={onUserChange} />
       </div>
     </div>
