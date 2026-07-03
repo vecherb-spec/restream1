@@ -188,6 +188,16 @@ function metricValue(value?: string | number | null) {
   return value == null || value === "" ? "-" : value;
 }
 
+function displayStatusLabel(label?: string) {
+  if (!label) {
+    return "Офлайн";
+  }
+  if (label === "Поток в SRS, рестрим не запущен") {
+    return "Есть поток - рестрим не запущен";
+  }
+  return label;
+}
+
 function AuthCard({ onAuthenticated }: { onAuthenticated: (user: User) => void }) {
   const [mode, setMode] = useState<AuthMode>("login");
   const [username, setUsername] = useState("");
@@ -395,6 +405,7 @@ function BroadcastTopbar({
   onLogout: () => void;
 }) {
   const { status } = streamState;
+  const statusLabel = displayStatusLabel(status?.label);
 
   return (
     <header className="broadcast-topbar">
@@ -404,7 +415,7 @@ function BroadcastTopbar({
       </div>
       <div className="broadcast-status-pill">
         <Lamp color={status?.color || "red"} />
-        <span>{status?.label || "Офлайн"}</span>
+        <span>{statusLabel}</span>
       </div>
       <div className="broadcast-user">
         <div className="avatar">{user.username.slice(0, 1).toUpperCase()}</div>
@@ -438,6 +449,7 @@ function BroadcastMain({
   const [titleError, setTitleError] = useState("");
   const [savingTitle, setSavingTitle] = useState(false);
   const isOnAir = Boolean(status?.publisher || status?.process?.status === "running");
+  const statusLabel = displayStatusLabel(status?.label);
 
   async function copyValue(label: string, value: string) {
     await navigator.clipboard?.writeText(value);
@@ -538,7 +550,7 @@ function BroadcastMain({
       <div className="broadcast-metrics">
         <div className="broadcast-metric-card">
           <span>Статус</span>
-          <strong>{status?.label || "Офлайн"}</strong>
+          <strong>{statusLabel}</strong>
         </div>
         <div className="broadcast-metric-card">
           <span>Разрешение</span>

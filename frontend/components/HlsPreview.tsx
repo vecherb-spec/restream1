@@ -26,18 +26,6 @@ export function HlsPreview({ streamKey }: HlsPreviewProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const sourceUrl = useMemo(() => `${HLS_BASE_URL}/${streamKey}.m3u8`, [streamKey]);
 
-  function jumpToLive() {
-    const video = videoRef.current;
-    if (!video || video.seekable.length === 0) {
-      video?.play().catch(() => undefined);
-      return;
-    }
-
-    const liveEdge = video.seekable.end(video.seekable.length - 1);
-    video.currentTime = Math.max(0, liveEdge - 0.5);
-    video.play().catch(() => undefined);
-  }
-
   useEffect(() => {
     const video = videoRef.current;
     if (!video) {
@@ -78,9 +66,6 @@ export function HlsPreview({ streamKey }: HlsPreviewProps) {
   return (
     <div className="preview-shell">
       <video ref={videoRef} className="preview" controls muted autoPlay playsInline />
-      <button className="player-live-button" onClick={jumpToLive}>
-        Live
-      </button>
     </div>
   );
 }
