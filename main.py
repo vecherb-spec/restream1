@@ -123,6 +123,8 @@ SMTP_USERNAME = os.getenv("RESTREAM_SMTP_USERNAME", "").strip()
 SMTP_PASSWORD = os.getenv("RESTREAM_SMTP_PASSWORD", "").strip()
 SMTP_FROM = os.getenv("RESTREAM_SMTP_FROM", SMTP_USERNAME or "no-reply@restream.medialive.ru").strip()
 SMTP_USE_TLS = os.getenv("RESTREAM_SMTP_TLS", "true").lower() == "true"
+SMTP_USE_SSL = os.getenv("RESTREAM_SMTP_SSL", "false").lower() == "true" or SMTP_PORT == 465
+SMTP_TIMEOUT = int(os.getenv("RESTREAM_SMTP_TIMEOUT", "20"))
 
 active_processes: dict[str, dict[str, Any]] = {}
 active_publishers: dict[str, dict[str, Any]] = {}
@@ -317,12 +319,15 @@ def send_password_reset_email(user: dict[str, Any], token: str) -> None:
         )
     )
 
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as smtp:
-        if SMTP_USE_TLS:
+    with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT) if SMTP_USE_SSL else smtplib.SMTP(
+        SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT
+    ) as smtp:
+        if not SMTP_USE_SSL and SMTP_USE_TLS:
             smtp.starttls()
         if SMTP_USERNAME:
             smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
         smtp.send_message(message)
+    logger.info("Password reset email sent to %s for user %s", email, user.get("username"))
 
 
 def build_pending_user_settings(user: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
