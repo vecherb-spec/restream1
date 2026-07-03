@@ -339,7 +339,12 @@ function SettingsForm({
     try {
       const response = await updateSettings(nextSettings);
       onSaved(response.user);
-      setMessage(`${platform.title}: ${nextActive ? "Start выполнен" : "Stop выполнен"}.`);
+      if (nextActive && !response.ffmpeg_started) {
+        const restartResponse = await restartMyRestream();
+        setMessage(`${platform.title}: ${restartResponse.message}`);
+      } else {
+        setMessage(`${platform.title}: ${nextActive ? "Start выполнен" : "Stop выполнен"}.`);
+      }
     } catch (requestError) {
       setSettings(previousSettings);
       setError(requestError instanceof Error ? requestError.message : "Не удалось переключить площадку");
@@ -537,6 +542,7 @@ function BroadcastMain({
     try {
       const response = await restartMyRestream();
       setClientLogInfo(response.message || "Рестрим перезапущен.");
+      setClientLogLines(response.log_lines || []);
     } catch (requestError) {
       setClientLogError(requestError instanceof Error ? requestError.message : "Не удалось перезапустить рестрим");
     } finally {

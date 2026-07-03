@@ -224,7 +224,10 @@ export async function restartMyRestream(token?: string) {
     message: string;
     stream_key: string;
     started: boolean;
+    ffmpeg_status?: string;
+    return_code?: number | null;
     destinations: number;
+    log_lines?: string[];
   }>("/api/me/restart-restream", { method: "PUT" }, token);
 }
 

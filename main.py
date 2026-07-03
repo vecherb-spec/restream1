@@ -813,20 +813,43 @@ def restart_restream_from_current_input(user: dict[str, Any]) -> dict[str, Any]:
         }
 
     started = start_ffmpeg(stream_key, destinations)
+    # Give FFmpeg a moment to fail fast (bad input/destination), so the UI can show a useful reason.
+    time_wait_seconds = float(os.getenv("RESTREAM_RESTART_STATUS_WAIT_SECONDS", "1.5"))
+    if time_wait_seconds > 0:
+        try:
+            import time as _time
+
+            _time.sleep(min(time_wait_seconds, 5))
+        except Exception:
+            pass
+
     with process_lock:
+        process_entry = active_processes.get(stream_key)
+        process = process_entry.get("process") if process_entry else None
+        return_code = process.poll() if process else None
+        log_path = process_entry.get("log_path") if process_entry else None
         active_publishers[stream_key] = {
             "published_at": utc_now_iso(),
             "destinations": len(destinations),
-            "ffmpeg_started": started,
+            "ffmpeg_started": started and return_code is None,
             "manual_resync": True,
         }
 
+    log_lines = tail_log_file(log_path, lines=40)
+    ffmpeg_running = bool(started and return_code is None)
     return {
         "code": 0,
-        "message": "Рестрим перезапущен. Если OBS сейчас не отправляет поток, запустите OBS заново.",
+        "message": (
+            "Рестрим перезапущен."
+            if ffmpeg_running
+            else "FFmpeg не удержался в работе. Проверьте лог ниже и OBS/ключи площадок."
+        ),
         "stream_key": stream_key,
-        "started": started,
+        "started": ffmpeg_running,
+        "ffmpeg_status": "running" if ffmpeg_running else "exited",
+        "return_code": return_code,
         "destinations": len(destinations),
+        "log_lines": log_lines,
     }
 
 
