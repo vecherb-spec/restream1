@@ -183,6 +183,10 @@ function isPlatformConfigured(platform: PlatformConfig, settings: RestreamSettin
   return Boolean(streamKey && url);
 }
 
+function metricValue(value?: string | number | null) {
+  return value == null || value === "" ? "-" : value;
+}
+
 function AuthCard({ onAuthenticated }: { onAuthenticated: (user: User) => void }) {
   const [mode, setMode] = useState<AuthMode>("login");
   const [username, setUsername] = useState("");
@@ -257,54 +261,6 @@ function AuthCard({ onAuthenticated }: { onAuthenticated: (user: User) => void }
   );
 }
 
-function StreamStatusCard({
-  status,
-  error,
-  transport,
-}: {
-  status: StreamStatus | null;
-  error: string;
-  transport: StreamTransport;
-}) {
-  if (error) {
-    return <div className="error">{error}</div>;
-  }
-
-  if (!status) {
-    return <div className="card">Загрузка статуса...</div>;
-  }
-
-  return (
-    <div className="card">
-      <div className="status">
-        <Lamp color={status.color} />
-        {status.label}
-      </div>
-      <p className="muted">
-        {status.message} · обновление: {transport === "sse" ? "SSE live" : "fallback polling"}
-      </p>
-      <div className="grid">
-        <div className="metric">
-          Bitrate
-          <strong>{status.bitrate || "-"}</strong>
-        </div>
-        <div className="metric">
-          FPS
-          <strong>{status.fps == null ? "-" : status.fps.toFixed(1)}</strong>
-        </div>
-        <div className="metric">
-          Разрешение
-          <strong>{status.resolution || "определяется"}</strong>
-        </div>
-        <div className="metric">
-          Площадок
-          <strong>{status.destinations}</strong>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function SettingsForm({
   user,
   streamStatus,
@@ -362,12 +318,18 @@ function SettingsForm({
   }
 
   return (
-    <div className="card">
-      <h2>Площадки рестрима</h2>
-      <p className="muted">
-        Тариф `{user.plan || "free"}`: включено {enabledDestinations} из {maxDestinations} разрешенных площадок.
-        Поля сохраняются сразу при нажатии Start/Stop.
-      </p>
+    <aside className="channels-panel">
+      <div className="channels-tabs">
+        <button className="channel-tab active">Каналы</button>
+        <button className="channel-tab">Чат</button>
+      </div>
+      <div className="channel-search">Поиск</div>
+      <div className="channels-toolbar">
+        <span>Платформы</span>
+        <strong>
+          {enabledDestinations}/{maxDestinations}
+        </strong>
+      </div>
 
       {platformConfigs.map((platform) => {
         const active = Boolean(settings[platform.activeKey]);
@@ -415,7 +377,127 @@ function SettingsForm({
 
       {error && <div className="error">{error}</div>}
       {message && <div className="alert">{message}</div>}
-    </div>
+      <p className="muted channel-footnote">
+        Поля сохраняются сразу при Start/Stop. Красный индикатор означает, что площадка в эфире.
+      </p>
+    </aside>
+  );
+}
+
+function ClientSidebar({
+  user,
+  onLogout,
+}: {
+  user: User;
+  onLogout: () => void;
+}) {
+  const menu = ["Главная", "Планировщик", "Мои видео", "Транскодинг", "Аналитика", "Настройки"];
+
+  return (
+    <aside className="client-sidebar">
+      <div className="brand">
+        <span className="brand-mark">M</span>
+        <strong>MediaLive</strong>
+      </div>
+      <div className="account-card">
+        <div className="avatar">{user.username.slice(0, 1).toUpperCase()}</div>
+        <div>
+          <strong>{user.username}</strong>
+          <small>Личный проект</small>
+        </div>
+      </div>
+      <div className="plan-card">
+        <span>{user.plan || "free"}</span>
+        <small>до {user.max_destinations ?? 1} каналов</small>
+      </div>
+      <nav className="sidebar-nav">
+        {menu.map((item, index) => (
+          <button className={index === 0 ? "active" : ""} key={item}>
+            {item}
+          </button>
+        ))}
+      </nav>
+      <button className="sidebar-logout" onClick={onLogout}>
+        Выйти
+      </button>
+    </aside>
+  );
+}
+
+function StreamWorkspace({
+  user,
+  streamState,
+}: {
+  user: User;
+  streamState: ReturnType<typeof useStreamStatus>;
+}) {
+  const { status, error, transport } = streamState;
+  const isOnAir = Boolean(status?.publisher || status?.process?.status === "running");
+
+  return (
+    <section className="studio-main">
+      <div className="stream-card">
+        <div className="stream-card-header">
+          <div className="stream-state">
+            <Lamp color={status?.color || "red"} />
+            <strong>{status?.label || "Офлайн"}</strong>
+          </div>
+          <div className="rtmp-pill">RTMP и ключ</div>
+        </div>
+        <div className={`stream-preview ${isOnAir ? "on-air" : ""}`}>
+          {isOnAir ? (
+            <HlsPreview streamKey={user.stream_key} />
+          ) : (
+            <div className="start-guide">
+              <h2>С чего начать?</h2>
+              <p>Несколько шагов для запуска restream</p>
+              <button>1. Добавьте каналы справа</button>
+              <button>2. Скопируйте RTMP и ключ</button>
+              <button>3. Начните трансляцию в OBS</button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="stream-meta">
+        <button className="title-chip">Название и описание</button>
+        <div>
+          <h1>Название трансляции</h1>
+          <p className="muted">{status?.message || error || "Ожидаем статус трансляции."}</p>
+        </div>
+      </div>
+
+      <div className="metrics-strip">
+        <div>
+          <span>Статус</span>
+          <strong>{status?.label || "Офлайн"}</strong>
+        </div>
+        <div>
+          <span>Разрешение</span>
+          <strong>{metricValue(status?.resolution)}</strong>
+        </div>
+        <div>
+          <span>Битрейт</span>
+          <strong>{metricValue(status?.bitrate)}</strong>
+        </div>
+        <div>
+          <span>FPS</span>
+          <strong>{status?.fps == null ? "-" : status.fps.toFixed(1)}</strong>
+        </div>
+      </div>
+
+      <div className="obs-card">
+        <div>
+          <span>Server</span>
+          <strong>{OBS_SERVER_URL}</strong>
+        </div>
+        <div>
+          <span>Stream Key</span>
+          <strong>{user.stream_key}</strong>
+        </div>
+        <small>Статус обновляется через {transport === "sse" ? "SSE live" : "fallback polling"}.</small>
+      </div>
+    </section>
   );
 }
 
@@ -436,38 +518,10 @@ function Dashboard({
   }
 
   return (
-    <div className="shell">
-      <header className="header">
-        <div>
-          <h1>Личный кабинет</h1>
-          <p className="muted">Здравствуйте, {user.username}</p>
-        </div>
-        <button className="button secondary" onClick={handleLogout}>
-          Выйти
-        </button>
-      </header>
-
-      <div className="grid">
-        <div className="card">
-          <h2>OBS</h2>
-          <p className="muted">Server</p>
-          <strong>{OBS_SERVER_URL}</strong>
-          <p className="muted">Stream Key</p>
-          <strong>{user.stream_key}</strong>
-          <p className="muted">Тариф</p>
-          <strong>
-            {user.plan || "free"} · до {user.max_destinations ?? 1} активных площадок
-          </strong>
-        </div>
-        <StreamStatusCard {...streamState} />
-      </div>
-
-      <div className="card" style={{ marginTop: 16 }}>
-        <h2>Превью</h2>
-        <HlsPreview streamKey={user.stream_key} />
-      </div>
-
-      <div style={{ marginTop: 16 }}>
+    <div className="client-shell">
+      <ClientSidebar user={user} onLogout={handleLogout} />
+      <StreamWorkspace user={user} streamState={streamState} />
+      <div className="client-channels">
         <SettingsForm user={user} streamStatus={streamState.status} onSaved={onUserChange} />
       </div>
     </div>
