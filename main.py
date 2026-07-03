@@ -284,14 +284,18 @@ def password_reset_url(token: str) -> str:
     return f"{PUBLIC_BASE_URL}/?reset_token={token}"
 
 
-def send_password_reset_email(user: dict[str, Any], token: str) -> None:
-    """Send password reset email when SMTP is configured; otherwise log the link."""
+def send_password_reset_email(user: dict[str, Any], token: str) -> dict[str, Any]:
+    """Send password reset email or return a direct reset link for the UI."""
 
     email = str(user.get("email") or "").strip()
     reset_url = password_reset_url(token)
     if not email:
         logger.info("Password reset requested for %s without email. Reset URL: %s", user.get("username"), reset_url)
-        return
+        return {
+            "delivery": "link",
+            "message": "У пользователя не указан email. Используйте ссылку ниже.",
+            "reset_url": reset_url,
+        }
 
     if not SMTP_HOST:
         logger.warning(
@@ -300,7 +304,11 @@ def send_password_reset_email(user: dict[str, Any], token: str) -> None:
             email,
             reset_url,
         )
-        return
+        return {
+            "delivery": "link",
+            "message": "Письмо не отправлено: SMTP не настроен. Используйте ссылку ниже.",
+            "reset_url": reset_url,
+        }
 
     message = EmailMessage()
     message["Subject"] = "Восстановление пароля MediaLive"
@@ -319,15 +327,29 @@ def send_password_reset_email(user: dict[str, Any], token: str) -> None:
         )
     )
 
-    with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT) if SMTP_USE_SSL else smtplib.SMTP(
-        SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT
-    ) as smtp:
-        if not SMTP_USE_SSL and SMTP_USE_TLS:
-            smtp.starttls()
-        if SMTP_USERNAME:
-            smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
-        smtp.send_message(message)
+    try:
+        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT) if SMTP_USE_SSL else smtplib.SMTP(
+            SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT
+        ) as smtp:
+            if not SMTP_USE_SSL and SMTP_USE_TLS:
+                smtp.starttls()
+            if SMTP_USERNAME:
+                smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
+            smtp.send_message(message)
+    except Exception:
+        logger.exception("Failed to send password reset email for %s", user.get("username"))
+        return {
+            "delivery": "link",
+            "message": "Не удалось отправить письмо. Используйте ссылку ниже.",
+            "reset_url": reset_url,
+        }
+
     logger.info("Password reset email sent to %s for user %s", email, user.get("username"))
+    return {
+        "delivery": "email",
+        "message": f"Письмо для восстановления отправлено на {email}.",
+        "reset_url": None,
+    }
 
 
 def build_pending_user_settings(user: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
@@ -1057,18 +1079,18 @@ def api_logout(
 
 @app.post("/api/auth/forgot-password")
 def api_forgot_password(payload: ForgotPasswordPayload) -> dict[str, Any]:
-    """Request password reset email without revealing whether the account exists."""
+    """Request password reset for an existing user."""
 
     user, token = create_password_reset_token(payload.identifier)
-    if user is not None and token is not None:
-        try:
-            send_password_reset_email(user, token)
-        except Exception:
-            logger.exception("Failed to send password reset email for %s", user.get("username"))
+    if user is None or token is None:
+        raise HTTPException(status_code=404, detail="Пользователь не найден.")
 
+    result = send_password_reset_email(user, token)
     return {
         "code": 0,
-        "message": "Если аккаунт найден, письмо восстановления отправлено на email.",
+        "message": result["message"],
+        "delivery": result["delivery"],
+        "reset_url": result.get("reset_url"),
     }
 
 

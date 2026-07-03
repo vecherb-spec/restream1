@@ -239,6 +239,7 @@ function AuthCard({
   const [resetIdentifier, setResetIdentifier] = useState("");
   const [resetToken, setResetToken] = useState(initialResetToken);
   const [resetNewPassword, setResetNewPassword] = useState("");
+  const [resetLink, setResetLink] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -247,11 +248,15 @@ function AuthCard({
     event.preventDefault();
     setError("");
     setMessage("");
+    setResetLink("");
     setLoading(true);
     try {
       if (mode === "forgot") {
         const response = await requestPasswordReset(resetIdentifier);
         setMessage(response.message);
+        if (response.reset_url) {
+          setResetLink(response.reset_url);
+        }
       } else if (mode === "reset") {
         const response = await resetPassword(resetToken, resetNewPassword);
         setMessage(response.message);
@@ -342,6 +347,11 @@ function AuthCard({
         )}
         {error && <div className="error">{error}</div>}
         {message && <div className="alert">{message}</div>}
+        {resetLink && (
+          <a className="button secondary" href={resetLink} style={{ textAlign: "center" }}>
+            Перейти к восстановлению пароля
+          </a>
+        )}
         <button className="button" disabled={loading}>
           {loading
             ? "Подождите..."

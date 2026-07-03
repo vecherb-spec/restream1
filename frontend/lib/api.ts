@@ -203,10 +203,13 @@ export async function logout(token?: string) {
 }
 
 export async function requestPasswordReset(identifier: string) {
-  return request<{ code: number; message: string }>("/api/auth/forgot-password", {
-    method: "POST",
-    body: JSON.stringify({ identifier }),
-  });
+  return request<{ code: number; message: string; delivery?: string; reset_url?: string | null }>(
+    "/api/auth/forgot-password",
+    {
+      method: "POST",
+      body: JSON.stringify({ identifier }),
+    },
+  );
 }
 
 export async function resetPassword(token: string, newPassword: string) {
