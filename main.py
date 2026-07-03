@@ -17,7 +17,6 @@ import shutil
 import socket
 import subprocess
 import threading
-import time
 import json
 import asyncio
 from datetime import datetime, timezone
@@ -90,8 +89,6 @@ SRS_INPUT_URL_TEMPLATE = os.getenv(
 FFMPEG_BIN = os.getenv("FFMPEG_BIN", "ffmpeg")
 FFPROBE_BIN = os.getenv("FFPROBE_BIN", "ffprobe")
 LOG_DIR = Path(os.getenv("RESTREAM_LOG_DIR", "logs"))
-INPUT_METRICS_INTERVAL_SECONDS = int(os.getenv("RESTREAM_INPUT_METRICS_INTERVAL_SECONDS", "10"))
-INPUT_METRICS_SAMPLE_SECONDS = int(os.getenv("RESTREAM_INPUT_METRICS_SAMPLE_SECONDS", "3"))
 COOKIE_NAME = os.getenv("RESTREAM_COOKIE_NAME", "restream_session")
 COOKIE_MAX_AGE_SECONDS = int(os.getenv("RESTREAM_AUTH_SESSION_DAYS", "7")) * 24 * 60 * 60
 COOKIE_SECURE = os.getenv("RESTREAM_COOKIE_SECURE", "true").lower() == "true"
@@ -369,200 +366,6 @@ def parse_ffmpeg_progress(log_path: str | Path | None) -> dict[str, Any]:
     return metrics
 
 
-def parse_rate_fraction(value: str | None) -> float | None:
-    """Parse ffprobe rate values such as 30000/1001 into a float."""
-
-    if not value or value in {"0/0", "N/A"}:
-        return None
-    if "/" not in value:
-        try:
-            return float(value)
-        except ValueError:
-            return None
-
-    numerator_raw, denominator_raw = value.split("/", 1)
-    try:
-        numerator = float(numerator_raw)
-        denominator = float(denominator_raw)
-    except ValueError:
-        return None
-    if denominator == 0:
-        return None
-    return round(numerator / denominator, 2)
-
-
-def format_bits_per_second(value: str | int | float | None) -> str:
-    """Format a bits-per-second value the same way FFmpeg progress reports bitrate."""
-
-    if value in {None, "", "N/A"}:
-        return ""
-    try:
-        bits_per_second = float(value)
-    except (TypeError, ValueError):
-        return ""
-    if bits_per_second <= 0:
-        return ""
-    return f"{bits_per_second / 1000:.1f}kbits/s"
-
-
-def probe_input_stream_info(input_url: str) -> dict[str, Any]:
-    """Probe basic video metadata from the live SRS input."""
-
-    try:
-        result = subprocess.run(
-            [
-                FFPROBE_BIN,
-                "-v",
-                "error",
-                "-select_streams",
-                "v:0",
-                "-show_entries",
-                "stream=width,height,avg_frame_rate,r_frame_rate,bit_rate:format=bit_rate",
-                "-of",
-                "json",
-                input_url,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=8,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return {}
-
-    try:
-        data = json.loads(result.stdout or "{}")
-    except json.JSONDecodeError:
-        return {}
-
-    streams = data.get("streams") or []
-    stream = streams[0] if streams else {}
-    format_info = data.get("format") or {}
-
-    metrics: dict[str, Any] = {}
-    try:
-        width = int(stream.get("width") or 0)
-        height = int(stream.get("height") or 0)
-    except (TypeError, ValueError):
-        width = height = 0
-    if width and height:
-        metrics["resolution"] = f"{width}x{height}"
-
-    fps = parse_rate_fraction(stream.get("avg_frame_rate")) or parse_rate_fraction(stream.get("r_frame_rate"))
-    if fps:
-        metrics["fps"] = fps
-
-    bitrate = format_bits_per_second(stream.get("bit_rate") or format_info.get("bit_rate"))
-    if bitrate:
-        metrics["bitrate"] = bitrate
-
-    return metrics
-
-
-def sample_input_stream_bitrate(input_url: str) -> dict[str, Any]:
-    """Estimate live input bitrate from a short FFmpeg copy sample."""
-
-    command = [
-        FFMPEG_BIN,
-        "-hide_banner",
-        "-nostats",
-        "-loglevel",
-        "error",
-        "-progress",
-        "pipe:1",
-        "-t",
-        str(max(1, INPUT_METRICS_SAMPLE_SECONDS)),
-        "-i",
-        input_url,
-        "-map",
-        "0:v:0",
-        "-c",
-        "copy",
-        "-f",
-        "mpegts",
-        "-y",
-        "/dev/null",
-    ]
-    try:
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=max(6, INPUT_METRICS_SAMPLE_SECONDS + 5),
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return {}
-
-    progress: dict[str, str] = {}
-    for line in (result.stdout or "").splitlines():
-        if "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        progress[key.strip()] = value.strip()
-
-    metrics: dict[str, Any] = {}
-    try:
-        total_size = int(progress.get("total_size") or 0)
-    except ValueError:
-        total_size = 0
-
-    out_time_raw = progress.get("out_time_us") or progress.get("out_time_ms") or "0"
-    try:
-        out_time_seconds = int(out_time_raw) / 1_000_000
-    except ValueError:
-        out_time_seconds = 0
-
-    if total_size > 0 and out_time_seconds > 0:
-        metrics["bitrate"] = format_bits_per_second((total_size * 8) / out_time_seconds)
-
-    try:
-        fps = float(progress.get("fps") or 0)
-    except ValueError:
-        fps = 0
-    if fps > 0:
-        metrics["fps"] = round(fps, 2)
-
-    dropped_frames_raw = progress.get("drop_frames") or progress.get("dropped_frames")
-    if dropped_frames_raw is not None:
-        try:
-            metrics["dropped_frames"] = int(dropped_frames_raw)
-        except ValueError:
-            pass
-
-    return metrics
-
-
-def update_publisher_metrics(stream_key: str, metrics: dict[str, Any]) -> None:
-    """Store latest input metrics on the active SRS publisher entry."""
-
-    if not metrics:
-        return
-
-    metrics["metrics_updated_at"] = utc_now_iso()
-    with process_lock:
-        publisher = active_publishers.get(stream_key)
-        if publisher is not None:
-            publisher.update({key: value for key, value in metrics.items() if value not in {None, ""}})
-
-
-def monitor_input_metrics(stream_key: str, input_url: str, published_at: str) -> None:
-    """Periodically refresh input stream metrics while SRS is publishing."""
-
-    while True:
-        with process_lock:
-            publisher = active_publishers.get(stream_key)
-            if publisher is None or publisher.get("published_at") != published_at:
-                return
-            has_restream_process = stream_key in active_processes
-
-        metrics = probe_input_stream_info(input_url)
-        if not metrics.get("bitrate") and not has_restream_process:
-            metrics.update(sample_input_stream_bitrate(input_url))
-        update_publisher_metrics(stream_key, metrics)
-        time.sleep(max(5, INPUT_METRICS_INTERVAL_SECONDS))
-
-
 def process_snapshot(stream_key: str, entry: dict[str, Any]) -> dict[str, Any]:
     """Serialize a process entry for the admin API."""
 
@@ -653,17 +456,9 @@ def stream_status_payload(stream_key: str) -> dict[str, Any]:
 
     frame = int(process.get("frame") or 0) if process else 0
     fps = process.get("fps") if process and process.get("fps") is not None else None
-    if fps is None and publisher:
-        fps = publisher.get("fps")
     bitrate = process.get("bitrate") if process and process.get("bitrate") else ""
-    if not bitrate and publisher:
-        bitrate = str(publisher.get("bitrate") or "")
     resolution = process.get("resolution") if process and process.get("resolution") else ""
-    if not resolution and publisher:
-        resolution = str(publisher.get("resolution") or "")
     dropped_frames = process.get("dropped_frames") if process and process.get("dropped_frames") is not None else None
-    if dropped_frames is None and publisher:
-        dropped_frames = publisher.get("dropped_frames")
 
     if not publisher:
         color = "red"
@@ -1376,17 +1171,7 @@ async def on_publish(request: Request) -> JSONResponse:
             "published_at": published_at,
             "destinations": len(destinations),
             "ffmpeg_started": started,
-            "resolution": "",
-            "fps": None,
-            "bitrate": "",
         }
-
-    threading.Thread(
-        target=monitor_input_metrics,
-        args=(stream_key, SRS_INPUT_URL_TEMPLATE.format(stream_key=stream_key), published_at),
-        name=f"input-metrics-{stream_key}",
-        daemon=True,
-    ).start()
 
     return JSONResponse(
         status_code=200,
