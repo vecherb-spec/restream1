@@ -8,9 +8,9 @@ if [[ ! -d "$REPO_DIR/.git" ]]; then
   exit 1
 fi
 
-if [[ ! -x "$REPO_DIR/venv/bin/uvicorn" ]]; then
+if [[ ! -x "$REPO_DIR/.venv/bin/uvicorn" && ! -x "$REPO_DIR/venv/bin/uvicorn" ]]; then
   echo "Create venv first:"
-  echo "  cd $REPO_DIR && python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt"
+  echo "  cd $REPO_DIR && python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt"
   exit 1
 fi
 
