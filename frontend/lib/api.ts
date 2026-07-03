@@ -198,7 +198,7 @@ export async function updateSettings(settings: RestreamSettings, token?: string)
 
 export async function updateStreamTitle(streamTitle: string, token?: string) {
   return request<{ code: number; message: string; user: User }>(
-    "/api/me/stream-title",
+    "/api/me/settings",
     {
       method: "POST",
       body: JSON.stringify({ stream_title: streamTitle }),

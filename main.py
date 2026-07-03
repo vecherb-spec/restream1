@@ -1011,6 +1011,20 @@ def api_update_my_settings(
     return {"code": 0, "user": public_user(fresh_user), "ffmpeg_started": ffmpeg_started}
 
 
+@app.post("/api/me/settings")
+@app.patch("/api/me/settings")
+def api_update_my_settings_title(
+    payload: StreamTitlePayload,
+    user: dict[str, Any] = Depends(get_current_api_user),
+) -> dict[str, Any]:
+    """Update broadcast title through the existing settings URL."""
+
+    success, message = update_stream_title(int(user["id"]), payload.stream_title)
+    if not success:
+        raise HTTPException(status_code=400, detail=message)
+    return {"code": 0, "message": message, "user": public_user(get_user_by_id(int(user["id"])))}
+
+
 @app.post("/api/me/password")
 def api_change_my_password(
     payload: PasswordChangePayload,
