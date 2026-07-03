@@ -210,6 +210,7 @@ def init_db() -> None:
                 role TEXT NOT NULL DEFAULT 'client',
                 plan TEXT NOT NULL DEFAULT 'free',
                 max_destinations INTEGER NOT NULL DEFAULT 1,
+                stream_title TEXT NOT NULL DEFAULT 'Название трансляции',
                 stream_key TEXT NOT NULL UNIQUE,
                 is_active INTEGER NOT NULL DEFAULT 1,
                 yt_active INTEGER NOT NULL DEFAULT 0,
@@ -232,6 +233,7 @@ def init_db() -> None:
         )
         ensure_column(connection, "users", "plan", "TEXT NOT NULL DEFAULT 'free'")
         ensure_column(connection, "users", "max_destinations", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(connection, "users", "stream_title", "TEXT NOT NULL DEFAULT 'Название трансляции'")
         connection.execute(
             f"""
             CREATE TABLE IF NOT EXISTS auth_sessions (
@@ -492,7 +494,7 @@ def list_users() -> list[dict[str, Any]]:
         rows = connection.execute(
             """
             SELECT
-                id, username, email, role, plan, max_destinations, stream_key, is_active,
+                id, username, email, role, plan, max_destinations, stream_title, stream_key, is_active,
                 yt_active, vk_active, rt_active, tg_active, custom_active, created_at
             FROM users
             ORDER BY id ASC
@@ -528,6 +530,25 @@ def update_user_plan(user_id: int, plan: str, max_destinations: int) -> tuple[bo
     if cursor.rowcount == 0:
         return False, "Пользователь не найден."
     return True, "Тариф обновлен."
+
+
+def update_stream_title(user_id: int, stream_title: str) -> tuple[bool, str]:
+    """Update the user's broadcast title."""
+
+    title = stream_title.strip()
+    if not title:
+        return False, "Название трансляции не может быть пустым."
+    if len(title) > 120:
+        return False, "Название трансляции должно быть не длиннее 120 символов."
+
+    with get_connection() as connection:
+        cursor = connection.execute(
+            "UPDATE users SET stream_title = ? WHERE id = ?",
+            (title, user_id),
+        )
+    if cursor.rowcount == 0:
+        return False, "Пользователь не найден."
+    return True, "Название трансляции обновлено."
 
 
 def update_user_password(user_id: int, new_password: str) -> tuple[bool, str]:

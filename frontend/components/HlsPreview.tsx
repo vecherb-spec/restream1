@@ -24,7 +24,7 @@ type HlsGlobal = HlsConstructor & {
 
 export function HlsPreview({ streamKey }: HlsPreviewProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const [message, setMessage] = useState("Если эфир запущен, превью появится через 10-30 секунд.");
+  const [message, setMessage] = useState("");
   const sourceUrl = useMemo(() => `${HLS_BASE_URL}/${streamKey}.m3u8`, [streamKey]);
 
   useEffect(() => {
@@ -36,7 +36,7 @@ export function HlsPreview({ streamKey }: HlsPreviewProps) {
     let hls: InstanceType<HlsConstructor> | null = null;
     if (video.canPlayType("application/vnd.apple.mpegurl")) {
       video.src = sourceUrl;
-      setMessage("Превью подключено. Нажмите Play.");
+      video.play().catch(() => undefined);
       return;
     }
 
@@ -54,7 +54,7 @@ export function HlsPreview({ streamKey }: HlsPreviewProps) {
       hls.loadSource(sourceUrl);
       hls.attachMedia(video);
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        setMessage("Превью подключено. Нажмите Play.");
+        video.play().catch(() => undefined);
       });
       hls.on(Hls.Events.ERROR, (_event: unknown, data: { fatal?: boolean }) => {
         if (data?.fatal) {
@@ -72,9 +72,8 @@ export function HlsPreview({ streamKey }: HlsPreviewProps) {
 
   return (
     <div>
-      <video ref={videoRef} className="preview" controls muted playsInline />
-      <p className="muted">{message}</p>
-      <p className="muted">HLS: {sourceUrl}</p>
+      <video ref={videoRef} className="preview" controls muted autoPlay playsInline />
+      {message && <p className="muted">{message}</p>}
     </div>
   );
 }

@@ -310,6 +310,58 @@ input {
   font-size: 24px;
 }
 
+.broadcast-title-row,
+.title-editor {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.broadcast-title-row h1 {
+  margin: 0;
+}
+
+.title-editor input {
+  min-width: min(420px, 60vw);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+  padding: 10px 12px;
+  font-weight: 800;
+  font-size: 20px;
+}
+
+.icon-button {
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.055);
+  color: var(--text);
+  cursor: pointer;
+  font-weight: 900;
+}
+
+.icon-button:hover {
+  border-color: rgba(139, 92, 246, 0.55);
+  background: rgba(139, 92, 246, 0.16);
+}
+
+.icon-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.title-error {
+  display: block;
+  color: var(--danger);
+  margin-top: 8px;
+}
+
 .eyebrow {
   color: var(--muted);
   font-size: 12px;

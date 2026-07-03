@@ -5,6 +5,7 @@ export type User = {
   role: "client" | "admin";
   plan: string;
   max_destinations: number;
+  stream_title: string;
   stream_key: string;
   is_active: number | boolean;
   yt_active: number | boolean;
@@ -190,6 +191,17 @@ export async function updateSettings(settings: RestreamSettings, token?: string)
     {
       method: "PUT",
       body: JSON.stringify(settings),
+    },
+    token,
+  );
+}
+
+export async function updateStreamTitle(streamTitle: string, token?: string) {
+  return request<{ code: number; message: string; user: User }>(
+    "/api/me/stream-title",
+    {
+      method: "PUT",
+      body: JSON.stringify({ stream_title: streamTitle }),
     },
     token,
   );

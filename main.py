@@ -47,6 +47,7 @@ from database import (
     regenerate_user_stream_key,
     set_user_active,
     update_user_plan,
+    update_stream_title,
     update_restream_settings,
     update_user_password,
     validate_destination_limit,
@@ -130,6 +131,10 @@ class RestreamSettingsPayload(BaseModel):
 class PasswordChangePayload(BaseModel):
     current_password: str
     new_password: str
+
+
+class StreamTitlePayload(BaseModel):
+    stream_title: str
 
 
 class AdminPasswordPayload(BaseModel):
@@ -448,8 +453,8 @@ def stream_status_payload(stream_key: str) -> dict[str, Any]:
         message = "OBS не публикует поток в SRS или SRS еще не прислал on_publish."
     elif destinations == 0:
         color = "yellow"
-        label = "Поток в SRS, рестрим не запущен"
-        message = "Входящий поток есть, но активные площадки не настроены."
+        label = "Есть поток - рестрим не запущен"
+        message = ""
     elif process and process.get("status") == "running":
         color = "green" if frame > 0 else "yellow"
         label = "Рестрим работает" if frame > 0 else "FFmpeg запущен, ждем кадры"
@@ -821,6 +826,19 @@ def api_change_my_password(
     if not success:
         raise HTTPException(status_code=400, detail=message)
     return {"code": 0, "message": message}
+
+
+@app.put("/api/me/stream-title")
+def api_update_my_stream_title(
+    payload: StreamTitlePayload,
+    user: dict[str, Any] = Depends(get_current_api_user),
+) -> dict[str, Any]:
+    """Update current user's broadcast title."""
+
+    success, message = update_stream_title(int(user["id"]), payload.stream_title)
+    if not success:
+        raise HTTPException(status_code=400, detail=message)
+    return {"code": 0, "message": message, "user": public_user(get_user_by_id(int(user["id"])))}
 
 
 @app.post("/api/me/stream-key")

@@ -31,6 +31,7 @@ import {
   stopAdminStream,
   updateAdminUserPlan,
   updateSettings,
+  updateStreamTitle,
   userToSettings,
 } from "@/lib/api";
 
@@ -424,12 +425,18 @@ function BroadcastTopbar({
 function BroadcastMain({
   user,
   streamState,
+  onUserChange,
 }: {
   user: User;
   streamState: ReturnType<typeof useStreamStatus>;
+  onUserChange: (user: User) => void;
 }) {
   const { status, error, transport } = streamState;
   const [copied, setCopied] = useState("");
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [draftTitle, setDraftTitle] = useState(user.stream_title || "Название трансляции");
+  const [titleError, setTitleError] = useState("");
+  const [savingTitle, setSavingTitle] = useState(false);
   const isOnAir = Boolean(status?.publisher || status?.process?.status === "running");
 
   async function copyValue(label: string, value: string) {
@@ -438,15 +445,77 @@ function BroadcastMain({
     window.setTimeout(() => setCopied(""), 1800);
   }
 
+  async function saveTitle() {
+    const nextTitle = draftTitle.trim();
+    if (!nextTitle) {
+      setTitleError("Название не может быть пустым.");
+      return;
+    }
+
+    setSavingTitle(true);
+    setTitleError("");
+    try {
+      const response = await updateStreamTitle(nextTitle);
+      onUserChange(response.user);
+      setEditingTitle(false);
+    } catch (requestError) {
+      setTitleError(requestError instanceof Error ? requestError.message : "Не удалось сохранить название");
+    } finally {
+      setSavingTitle(false);
+    }
+  }
+
+  function cancelTitleEdit() {
+    setDraftTitle(user.stream_title || "Название трансляции");
+    setTitleError("");
+    setEditingTitle(false);
+  }
+
   return (
     <section className="broadcast-main">
       <div className="broadcast-preview-card">
         <div className="broadcast-preview-header">
           <div>
             <span className="eyebrow">Главная трансляция</span>
-            <h1>Название трансляции</h1>
+            {editingTitle ? (
+              <div className="title-editor">
+                <input
+                  value={draftTitle}
+                  maxLength={120}
+                  autoFocus
+                  onChange={(event) => setDraftTitle(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      saveTitle();
+                    }
+                    if (event.key === "Escape") {
+                      cancelTitleEdit();
+                    }
+                  }}
+                />
+                <button className="icon-button" disabled={savingTitle} onClick={saveTitle}>
+                  ✓
+                </button>
+                <button className="icon-button" disabled={savingTitle} onClick={cancelTitleEdit}>
+                  ×
+                </button>
+              </div>
+            ) : (
+              <div className="broadcast-title-row">
+                <h1>{user.stream_title || "Название трансляции"}</h1>
+                <button
+                  className="icon-button"
+                  aria-label="Редактировать название трансляции"
+                  onClick={() => setEditingTitle(true)}
+                >
+                  ✎
+                </button>
+              </div>
+            )}
+            {titleError && <small className="title-error">{titleError}</small>}
           </div>
-          <div className="transport-chip">{transport === "sse" ? "SSE live" : "fallback"}</div>
+          <div className="transport-chip">{transport === "sse" ? "Live" : "fallback"}</div>
         </div>
         <div className={`broadcast-preview ${isOnAir ? "on-air" : ""}`}>
           {isOnAir ? (
@@ -466,7 +535,7 @@ function BroadcastMain({
         </div>
       </div>
 
-      <p className="broadcast-message">{status?.message || error || "Ожидаем статус трансляции."}</p>
+      {(status?.message || error) && <p className="broadcast-message">{status?.message || error}</p>}
 
       <div className="broadcast-metrics">
         <div className="broadcast-metric-card">
@@ -532,7 +601,7 @@ function Dashboard({
     <div className="broadcast-shell">
       <BroadcastTopbar user={user} streamState={streamState} onLogout={handleLogout} />
       <div className="broadcast-layout">
-        <BroadcastMain user={user} streamState={streamState} />
+        <BroadcastMain user={user} streamState={streamState} onUserChange={onUserChange} />
         <SettingsForm user={user} streamStatus={streamState.status} onSaved={onUserChange} />
       </div>
     </div>
@@ -717,7 +786,7 @@ function AdminDashboard({
           <h1>Админка Restream</h1>
           <p className="muted">
             Вы вошли как {user.username}. Мониторинг:{" "}
-            {transport === "sse" ? "SSE live" : "fallback polling"}.
+            {transport === "sse" ? "Live" : "fallback polling"}.
           </p>
         </div>
         <button className="button secondary" onClick={handleLogout}>
