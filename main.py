@@ -305,6 +305,27 @@ def log_path_for_stream(stream_key: str) -> Path:
     return LOG_DIR / f"ffmpeg_{safe_log_name(stream_key)}_{timestamp}.log"
 
 
+def find_latest_log_path_for_stream(stream_key: str) -> Path | None:
+    """Find the newest FFmpeg log file for a stream key on disk."""
+
+    safe_key = safe_log_name(stream_key)
+    if not LOG_DIR.exists() or not LOG_DIR.is_dir():
+        return None
+
+    candidates = [
+        path
+        for path in LOG_DIR.glob(f"ffmpeg_{safe_key}_*.log")
+        if path.is_file()
+    ]
+    if not candidates:
+        return None
+
+    try:
+        return max(candidates, key=lambda path: path.stat().st_mtime)
+    except OSError:
+        return None
+
+
 def tail_log_file(log_path: str | Path | None, lines: int = 80) -> list[str]:
     """Read the last N lines of a FFmpeg log file."""
 
@@ -1123,15 +1144,19 @@ def stream_logs(stream_key: str, lines: int = 80) -> dict[str, Any]:
     log_path = entry.get("log_path") if entry else None
     if log_path is None and recent_entry:
         log_path = recent_entry.get("log_path")
+    if log_path is None:
+        log_path = find_latest_log_path_for_stream(stream_key)
 
     if log_path is None:
         return {"code": 1, "message": "stream log was not found", "lines": []}
 
+    lines_payload = tail_log_file(log_path, lines=lines)
     return {
         "code": 0,
         "stream_key": stream_key,
         "log_path": str(log_path or ""),
-        "lines": tail_log_file(log_path, lines=lines),
+        "lines": lines_payload,
+        "message": "" if lines_payload else "stream log is empty",
     }
 
 

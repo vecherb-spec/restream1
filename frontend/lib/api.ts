@@ -223,18 +223,26 @@ export async function getStreamStatus(token?: string) {
 }
 
 export async function getMyStreamLogs(streamKey: string, token?: string) {
-  try {
-    return await request<{ code: number; message?: string; lines: string[] }>("/api/me/stream-logs", {}, token);
-  } catch (error) {
-    const message = error instanceof Error ? error.message.toLowerCase() : "";
-    if (!message.includes("not found") && !message.includes("404")) {
-      throw error;
-    }
+  async function legacyRequest() {
     return request<{ code: number; message?: string; lines: string[] }>(
       `/stream_logs/${encodeURIComponent(streamKey)}`,
       {},
       token,
     );
+  }
+
+  try {
+    const response = await request<{ code: number; message?: string; lines: string[] }>("/api/me/stream-logs", {}, token);
+    if (response.code !== 0 || !response.lines?.length) {
+      return legacyRequest();
+    }
+    return response;
+  } catch (error) {
+    const message = error instanceof Error ? error.message.toLowerCase() : "";
+    if (!message.includes("not found") && !message.includes("404")) {
+      throw error;
+    }
+    return legacyRequest();
   }
 }
 
