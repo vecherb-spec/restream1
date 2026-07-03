@@ -828,6 +828,7 @@ def api_change_my_password(
     return {"code": 0, "message": message}
 
 
+@app.post("/api/me/stream-title")
 @app.put("/api/me/stream-title")
 def api_update_my_stream_title(
     payload: StreamTitlePayload,

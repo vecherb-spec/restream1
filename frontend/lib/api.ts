@@ -200,7 +200,7 @@ export async function updateStreamTitle(streamTitle: string, token?: string) {
   return request<{ code: number; message: string; user: User }>(
     "/api/me/stream-title",
     {
-      method: "PUT",
+      method: "POST",
       body: JSON.stringify({ stream_title: streamTitle }),
     },
     token,

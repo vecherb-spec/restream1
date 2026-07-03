@@ -431,7 +431,7 @@ function BroadcastMain({
   streamState: ReturnType<typeof useStreamStatus>;
   onUserChange: (user: User) => void;
 }) {
-  const { status, error, transport } = streamState;
+  const { status, transport } = streamState;
   const [copied, setCopied] = useState("");
   const [editingTitle, setEditingTitle] = useState(false);
   const [draftTitle, setDraftTitle] = useState(user.stream_title || "Название трансляции");
@@ -534,8 +534,6 @@ function BroadcastMain({
           )}
         </div>
       </div>
-
-      {(status?.message || error) && <p className="broadcast-message">{status?.message || error}</p>}
 
       <div className="broadcast-metrics">
         <div className="broadcast-metric-card">

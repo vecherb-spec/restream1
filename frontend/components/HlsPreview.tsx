@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { HLS_BASE_URL } from "@/lib/api";
 
 type HlsPreviewProps = {
@@ -24,8 +24,19 @@ type HlsGlobal = HlsConstructor & {
 
 export function HlsPreview({ streamKey }: HlsPreviewProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const [message, setMessage] = useState("");
   const sourceUrl = useMemo(() => `${HLS_BASE_URL}/${streamKey}.m3u8`, [streamKey]);
+
+  function jumpToLive() {
+    const video = videoRef.current;
+    if (!video || video.seekable.length === 0) {
+      video?.play().catch(() => undefined);
+      return;
+    }
+
+    const liveEdge = video.seekable.end(video.seekable.length - 1);
+    video.currentTime = Math.max(0, liveEdge - 0.5);
+    video.play().catch(() => undefined);
+  }
 
   useEffect(() => {
     const video = videoRef.current;
@@ -46,7 +57,6 @@ export function HlsPreview({ streamKey }: HlsPreviewProps) {
     script.onload = () => {
       const Hls = (window as unknown as { Hls?: HlsGlobal }).Hls;
       if (!Hls?.isSupported()) {
-        setMessage("Этот браузер не поддерживает HLS.");
         return;
       }
 
@@ -55,11 +65,6 @@ export function HlsPreview({ streamKey }: HlsPreviewProps) {
       hls.attachMedia(video);
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
         video.play().catch(() => undefined);
-      });
-      hls.on(Hls.Events.ERROR, (_event: unknown, data: { fatal?: boolean }) => {
-        if (data?.fatal) {
-          setMessage("Пока нет HLS-потока или он недоступен.");
-        }
       });
     };
     document.body.appendChild(script);
@@ -71,9 +76,11 @@ export function HlsPreview({ streamKey }: HlsPreviewProps) {
   }, [sourceUrl]);
 
   return (
-    <div>
+    <div className="preview-shell">
       <video ref={videoRef} className="preview" controls muted autoPlay playsInline />
-      {message && <p className="muted">{message}</p>}
+      <button className="player-live-button" onClick={jumpToLive}>
+        Live
+      </button>
     </div>
   );
 }
