@@ -777,6 +777,59 @@ def sync_live_restream_worker(user: dict[str, Any]) -> bool:
     return started
 
 
+def restart_restream_from_current_input(user: dict[str, Any]) -> dict[str, Any]:
+    """Recreate backend publisher state and restart restream worker for current OBS input."""
+
+    stream_key = str(user.get("stream_key") or "")
+    if not stream_key:
+        return {"code": 1, "message": "stream key is missing", "stream_key": stream_key, "started": False}
+
+    destinations = get_enabled_destinations(user)
+    allowed, limit_message = validate_destination_limit(user)
+    if not allowed:
+        return {
+            "code": 1,
+            "message": limit_message,
+            "stream_key": stream_key,
+            "started": False,
+            "destinations": len(destinations),
+        }
+
+    if not destinations:
+        stop_process(stream_key)
+        with process_lock:
+            active_publishers[stream_key] = {
+                "published_at": utc_now_iso(),
+                "destinations": 0,
+                "ffmpeg_started": False,
+                "manual_resync": True,
+            }
+        return {
+            "code": 0,
+            "message": "Нет активных площадок для рестрима.",
+            "stream_key": stream_key,
+            "started": False,
+            "destinations": 0,
+        }
+
+    started = start_ffmpeg(stream_key, destinations)
+    with process_lock:
+        active_publishers[stream_key] = {
+            "published_at": utc_now_iso(),
+            "destinations": len(destinations),
+            "ffmpeg_started": started,
+            "manual_resync": True,
+        }
+
+    return {
+        "code": 0,
+        "message": "Рестрим перезапущен. Если OBS сейчас не отправляет поток, запустите OBS заново.",
+        "stream_key": stream_key,
+        "started": started,
+        "destinations": len(destinations),
+    }
+
+
 @app.post("/api/auth/login")
 def api_login(payload: LoginPayload, response: Response) -> dict[str, Any]:
     """Authenticate a user for the future web frontend."""
@@ -924,6 +977,18 @@ def api_my_stream_status(user: dict[str, Any] = Depends(get_current_api_user)) -
     """Return current user's stream status."""
 
     return stream_status_payload(user["stream_key"])
+
+
+@app.post("/api/me/restart-restream")
+@app.put("/api/me/restart-restream")
+def api_restart_my_restream(user: dict[str, Any] = Depends(get_current_api_user)) -> dict[str, Any]:
+    """Restart restream worker when backend lost SRS publish state after deploy/reload."""
+
+    fresh_user = get_user_by_id(int(user["id"])) or user
+    result = restart_restream_from_current_input(fresh_user)
+    if result.get("code") != 0:
+        raise HTTPException(status_code=400, detail=result.get("message") or "Не удалось перезапустить рестрим")
+    return result
 
 
 @app.get("/api/me/stream-status/events")

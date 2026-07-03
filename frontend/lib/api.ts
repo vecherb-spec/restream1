@@ -218,6 +218,16 @@ export async function resetMyStreamKey(token?: string) {
   );
 }
 
+export async function restartMyRestream(token?: string) {
+  return request<{
+    code: number;
+    message: string;
+    stream_key: string;
+    started: boolean;
+    destinations: number;
+  }>("/api/me/restart-restream", { method: "PUT" }, token);
+}
+
 export async function getStreamStatus(token?: string) {
   return request<StreamStatus>("/api/me/stream-status", {}, token);
 }

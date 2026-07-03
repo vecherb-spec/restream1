@@ -29,6 +29,7 @@ import {
   resetMyStreamKey,
   resetAdminUserPassword,
   resetAdminUserStreamKey,
+  restartMyRestream,
   setAdminUserActive,
   stopAdminStream,
   updateAdminUserPlan,
@@ -468,6 +469,7 @@ function BroadcastMain({
   const [titleError, setTitleError] = useState("");
   const [savingTitle, setSavingTitle] = useState(false);
   const [resettingStreamKey, setResettingStreamKey] = useState(false);
+  const [restartingRestream, setRestartingRestream] = useState(false);
   const [showStreamKey, setShowStreamKey] = useState(false);
   const [clientLogLines, setClientLogLines] = useState<string[]>([]);
   const [clientLogError, setClientLogError] = useState("");
@@ -525,6 +527,20 @@ function BroadcastMain({
       window.alert(requestError instanceof Error ? requestError.message : "Не удалось сгенерировать ключ");
     } finally {
       setResettingStreamKey(false);
+    }
+  }
+
+  async function restartRestream() {
+    setRestartingRestream(true);
+    setClientLogError("");
+    setClientLogInfo("");
+    try {
+      const response = await restartMyRestream();
+      setClientLogInfo(response.message || "Рестрим перезапущен.");
+    } catch (requestError) {
+      setClientLogError(requestError instanceof Error ? requestError.message : "Не удалось перезапустить рестрим");
+    } finally {
+      setRestartingRestream(false);
     }
   }
 
@@ -670,6 +686,15 @@ function BroadcastMain({
             {copied === "new-key" ? "Новый Stream Key сгенерирован. Скопируйте его в OBS." : `Скопировано: ${copied}`}
           </small>
         )}
+        <div className="obs-row">
+          <div>
+            <span>После деплоя / reload</span>
+            <strong>Если превью есть, а рестрим не стартует</strong>
+          </div>
+          <button className="button secondary" disabled={restartingRestream} onClick={restartRestream}>
+            {restartingRestream ? "Перезапуск..." : "Перезапустить рестрим"}
+          </button>
+        </div>
       </div>
 
       <div className="client-log-card">

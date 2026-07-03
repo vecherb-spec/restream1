@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { HLS_BASE_URL } from "@/lib/api";
 
 type HlsPreviewProps = {
@@ -24,7 +24,11 @@ type HlsGlobal = HlsConstructor & {
 
 export function HlsPreview({ streamKey }: HlsPreviewProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const sourceUrl = useMemo(() => `${HLS_BASE_URL}/${streamKey}.m3u8`, [streamKey]);
+  const [sourceVersion] = useState(() => Date.now());
+  const sourceUrl = useMemo(
+    () => `${HLS_BASE_URL}/${streamKey}.m3u8?v=${sourceVersion}`,
+    [streamKey, sourceVersion],
+  );
 
   useEffect(() => {
     const video = videoRef.current;
