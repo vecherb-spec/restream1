@@ -334,6 +334,7 @@ def parse_ffmpeg_progress(log_path: str | Path | None) -> dict[str, Any]:
         "fps": None,
         "bitrate": "",
         "speed": "",
+        "dropped_frames": None,
         "out_time_ms": None,
         "progress": "",
     }
@@ -355,6 +356,11 @@ def parse_ffmpeg_progress(log_path: str | Path | None) -> dict[str, Any]:
                 metrics["fps"] = None
         elif key in {"bitrate", "speed", "progress"}:
             metrics[key] = value
+        elif key in {"drop_frames", "dropped_frames"}:
+            try:
+                metrics["dropped_frames"] = int(value)
+            except ValueError:
+                metrics["dropped_frames"] = None
         elif key == "out_time_ms":
             try:
                 metrics["out_time_ms"] = int(value)
@@ -517,6 +523,13 @@ def sample_input_stream_bitrate(input_url: str) -> dict[str, Any]:
     if fps > 0:
         metrics["fps"] = round(fps, 2)
 
+    dropped_frames_raw = progress.get("drop_frames") or progress.get("dropped_frames")
+    if dropped_frames_raw is not None:
+        try:
+            metrics["dropped_frames"] = int(dropped_frames_raw)
+        except ValueError:
+            pass
+
     return metrics
 
 
@@ -568,6 +581,7 @@ def process_snapshot(stream_key: str, entry: dict[str, Any]) -> dict[str, Any]:
         "fps": progress["fps"],
         "bitrate": progress["bitrate"],
         "speed": progress["speed"],
+        "dropped_frames": progress["dropped_frames"],
         "resolution": entry.get("resolution") or "",
         "progress": progress["progress"],
     }
@@ -647,6 +661,9 @@ def stream_status_payload(stream_key: str) -> dict[str, Any]:
     resolution = process.get("resolution") if process and process.get("resolution") else ""
     if not resolution and publisher:
         resolution = str(publisher.get("resolution") or "")
+    dropped_frames = process.get("dropped_frames") if process and process.get("dropped_frames") is not None else None
+    if dropped_frames is None and publisher:
+        dropped_frames = publisher.get("dropped_frames")
 
     if not publisher:
         color = "red"
@@ -679,6 +696,7 @@ def stream_status_payload(stream_key: str) -> dict[str, Any]:
         "bitrate": bitrate,
         "speed": process.get("speed") if process else "",
         "resolution": resolution,
+        "dropped_frames": dropped_frames,
         "destinations": destinations,
     }
 

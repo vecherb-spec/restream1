@@ -34,6 +34,7 @@ export type StreamStatus = {
   fps: number | null;
   bitrate: string;
   resolution: string;
+  dropped_frames: number | null;
   destinations: number;
   publisher?: StreamPublisher | null;
   process?: StreamProcess | null;
@@ -70,6 +71,7 @@ export type StreamProcess = {
   bitrate?: string;
   speed?: string;
   resolution?: string;
+  dropped_frames?: number | null;
   progress?: string;
 };
 
@@ -78,6 +80,7 @@ export type StreamPublisher = {
   published_at?: string;
   destinations?: number;
   ffmpeg_started?: boolean;
+  dropped_frames?: number | null;
 };
 
 export type BackupInfo = {

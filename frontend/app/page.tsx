@@ -564,6 +564,10 @@ function BroadcastMain({
           <span>FPS</span>
           <strong>{status?.fps == null ? "-" : status.fps.toFixed(1)}</strong>
         </div>
+        <div className="broadcast-metric-card">
+          <span>Пропуск кадров</span>
+          <strong>{status?.dropped_frames == null ? "-" : status.dropped_frames}</strong>
+        </div>
       </div>
 
       <div className="obs-compact-card">
