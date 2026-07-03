@@ -12,6 +12,7 @@ import {
   StreamStatus,
   SystemMetrics,
   User,
+  changeMyPassword,
   createAdminBackup,
   getAdminBackups,
   getAdminDashboardEventsUrl,
@@ -26,9 +27,11 @@ import {
   login,
   logout,
   register,
+  requestPasswordReset,
   resetMyStreamKey,
   resetAdminUserPassword,
   resetAdminUserStreamKey,
+  resetPassword,
   setAdminUserActive,
   stopAdminStream,
   updateAdminUserPlan,
@@ -37,7 +40,8 @@ import {
   userToSettings,
 } from "@/lib/api";
 
-type AuthMode = "login" | "register";
+type AuthMode = "login" | "register" | "forgot" | "reset";
+type ClientView = "broadcast" | "profile";
 type StreamTransport = "sse" | "fallback";
 type PlatformId = "yt" | "vk" | "rt" | "tg" | "custom";
 
@@ -221,26 +225,47 @@ const planPresets = [
   { plan: "admin", maxDestinations: 99, title: "Admin" },
 ] as const;
 
-function AuthCard({ onAuthenticated }: { onAuthenticated: (user: User) => void }) {
-  const [mode, setMode] = useState<AuthMode>("login");
+function AuthCard({
+  onAuthenticated,
+  initialResetToken = "",
+}: {
+  onAuthenticated: (user: User) => void;
+  initialResetToken?: string;
+}) {
+  const [mode, setMode] = useState<AuthMode>(initialResetToken ? "reset" : "login");
   const [username, setUsername] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [resetIdentifier, setResetIdentifier] = useState("");
+  const [resetToken, setResetToken] = useState(initialResetToken);
+  const [resetNewPassword, setResetNewPassword] = useState("");
+  const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     setError("");
+    setMessage("");
     setLoading(true);
     try {
-      const response =
-        mode === "login"
-          ? await login(username, password)
-          : await register(username, password, email);
-      onAuthenticated(response.user);
+      if (mode === "forgot") {
+        const response = await requestPasswordReset(resetIdentifier);
+        setMessage(response.message);
+      } else if (mode === "reset") {
+        const response = await resetPassword(resetToken, resetNewPassword);
+        setMessage(response.message);
+        setPassword("");
+        setMode("login");
+      } else {
+        const response =
+          mode === "login"
+            ? await login(username, password)
+            : await register(username, password, email);
+        onAuthenticated(response.user);
+      }
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "Ошибка авторизации");
+      setError(requestError instanceof Error ? requestError.message : "Ошибка запроса");
     } finally {
       setLoading(false);
     }
@@ -262,34 +287,82 @@ function AuthCard({ onAuthenticated }: { onAuthenticated: (user: User) => void }
         </button>
       </div>
       <form className="form" onSubmit={submit}>
-        <label className="field">
-          Логин
-          <input value={username} onChange={(event) => setUsername(event.target.value)} required />
-        </label>
-        {mode === "register" && (
+        {mode === "forgot" ? (
           <label className="field">
-            Email
+            Логин или email
             <input
-              type="email"
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
+              value={resetIdentifier}
+              onChange={(event) => setResetIdentifier(event.target.value)}
               required
             />
           </label>
+        ) : mode === "reset" ? (
+          <>
+            <label className="field">
+              Токен восстановления
+              <input value={resetToken} onChange={(event) => setResetToken(event.target.value)} required />
+            </label>
+            <label className="field">
+              Новый пароль
+              <input
+                type="password"
+                value={resetNewPassword}
+                onChange={(event) => setResetNewPassword(event.target.value)}
+                required
+              />
+            </label>
+          </>
+        ) : (
+          <>
+            <label className="field">
+              Логин
+              <input value={username} onChange={(event) => setUsername(event.target.value)} required />
+            </label>
+            {mode === "register" && (
+              <label className="field">
+                Email
+                <input
+                  type="email"
+                  value={email}
+                  onChange={(event) => setEmail(event.target.value)}
+                  required
+                />
+              </label>
+            )}
+            <label className="field">
+              Пароль
+              <input
+                type="password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                required
+              />
+            </label>
+          </>
         )}
-        <label className="field">
-          Пароль
-          <input
-            type="password"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            required
-          />
-        </label>
         {error && <div className="error">{error}</div>}
+        {message && <div className="alert">{message}</div>}
         <button className="button" disabled={loading}>
-          {loading ? "Подождите..." : mode === "login" ? "Войти" : "Зарегистрироваться"}
+          {loading
+            ? "Подождите..."
+            : mode === "login"
+              ? "Войти"
+              : mode === "register"
+                ? "Зарегистрироваться"
+                : mode === "forgot"
+                  ? "Отправить письмо"
+                  : "Сохранить новый пароль"}
         </button>
+        {mode === "login" && (
+          <button className="tab" type="button" onClick={() => setMode("forgot")}>
+            Забыли пароль?
+          </button>
+        )}
+        {mode !== "login" && (
+          <button className="tab" type="button" onClick={() => setMode("login")}>
+            Вернуться ко входу
+          </button>
+        )}
       </form>
     </div>
   );
@@ -424,10 +497,14 @@ function SettingsForm({
 function BroadcastTopbar({
   user,
   streamState,
+  view,
+  onViewChange,
   onLogout,
 }: {
   user: User;
   streamState: ReturnType<typeof useStreamStatus>;
+  view: ClientView;
+  onViewChange: (view: ClientView) => void;
   onLogout: () => void;
 }) {
   const { status } = streamState;
@@ -451,9 +528,23 @@ function BroadcastTopbar({
             {user.plan || "free"} · до {user.max_destinations ?? 1} каналов
           </small>
         </div>
-        <button className="button secondary" onClick={onLogout}>
-          Выйти
-        </button>
+        <div className="actions">
+          <button
+            className={`button ${view === "broadcast" ? "" : "secondary"}`}
+            onClick={() => onViewChange("broadcast")}
+          >
+            Эфир
+          </button>
+          <button
+            className={`button ${view === "profile" ? "" : "secondary"}`}
+            onClick={() => onViewChange("profile")}
+          >
+            Профиль
+          </button>
+          <button className="button secondary" onClick={onLogout}>
+            Выйти
+          </button>
+        </div>
       </div>
     </header>
   );
@@ -706,6 +797,89 @@ function BroadcastMain({
   );
 }
 
+function ClientProfile({ user }: { user: User }) {
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function submitPassword(event: React.FormEvent) {
+    event.preventDefault();
+    setMessage("");
+    setError("");
+    setSaving(true);
+    try {
+      const response = await changeMyPassword(currentPassword, newPassword);
+      setMessage(response.message);
+      setCurrentPassword("");
+      setNewPassword("");
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Не удалось сменить пароль");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className="profile-page">
+      <div className="card">
+        <h2>Профиль клиента</h2>
+        <div className="profile-grid">
+          <div className="metric">
+            Логин
+            <strong>{user.username}</strong>
+          </div>
+          <div className="metric">
+            Email
+            <strong>{user.email || "-"}</strong>
+          </div>
+          <div className="metric">
+            Тариф
+            <strong>{user.plan || "free"}</strong>
+          </div>
+          <div className="metric">
+            Площадок
+            <strong>до {user.max_destinations ?? 1}</strong>
+          </div>
+        </div>
+        <p className="muted">
+          Текущий тариф определяет, сколько площадок можно включить одновременно.
+          Для изменения тарифа обратитесь к администратору.
+        </p>
+      </div>
+
+      <form className="card form" onSubmit={submitPassword}>
+        <h2>Смена пароля</h2>
+        <label className="field">
+          Текущий пароль
+          <input
+            type="password"
+            value={currentPassword}
+            onChange={(event) => setCurrentPassword(event.target.value)}
+            required
+          />
+        </label>
+        <label className="field">
+          Новый пароль
+          <input
+            type="password"
+            value={newPassword}
+            onChange={(event) => setNewPassword(event.target.value)}
+            required
+            minLength={8}
+          />
+        </label>
+        {error && <div className="error">{error}</div>}
+        {message && <div className="alert">{message}</div>}
+        <button className="button" disabled={saving}>
+          {saving ? "Сохраняем..." : "Сменить пароль"}
+        </button>
+      </form>
+    </section>
+  );
+}
+
 function Dashboard({
   user,
   onLogout,
@@ -716,6 +890,7 @@ function Dashboard({
   onUserChange: (user: User) => void;
 }) {
   const streamState = useStreamStatus();
+  const [view, setView] = useState<ClientView>("broadcast");
 
   async function handleLogout() {
     await logout().catch(() => undefined);
@@ -724,11 +899,21 @@ function Dashboard({
 
   return (
     <div className="broadcast-shell">
-      <BroadcastTopbar user={user} streamState={streamState} onLogout={handleLogout} />
-      <div className="broadcast-layout">
-        <BroadcastMain user={user} streamState={streamState} onUserChange={onUserChange} />
-        <SettingsForm user={user} streamStatus={streamState.status} onSaved={onUserChange} />
-      </div>
+      <BroadcastTopbar
+        user={user}
+        streamState={streamState}
+        view={view}
+        onViewChange={setView}
+        onLogout={handleLogout}
+      />
+      {view === "profile" ? (
+        <ClientProfile user={user} />
+      ) : (
+        <div className="broadcast-layout">
+          <BroadcastMain user={user} streamState={streamState} onUserChange={onUserChange} />
+          <SettingsForm user={user} streamStatus={streamState.status} onSaved={onUserChange} />
+        </div>
+      )}
     </div>
   );
 }
@@ -1176,6 +1361,13 @@ function AdminDashboard({
 export default function Home() {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const [resetToken] = useState(() => {
+    if (typeof window === "undefined") {
+      return "";
+    }
+    const params = new URLSearchParams(window.location.search);
+    return params.get("reset_token") || params.get("token") || "";
+  });
 
   useEffect(() => {
     getMe()
@@ -1212,7 +1404,7 @@ export default function Home() {
           }}
         />
       ) : (
-        <AuthCard onAuthenticated={onAuthenticated} />
+        <AuthCard onAuthenticated={onAuthenticated} initialResetToken={resetToken} />
       )}
     </main>
   );

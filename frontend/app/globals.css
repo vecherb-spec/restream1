@@ -515,6 +515,19 @@ select {
   color: var(--muted);
 }
 
+.profile-page {
+  display: grid;
+  gap: 16px;
+  max-width: 920px;
+}
+
+.profile-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin: 16px 0;
+}
+
 .client-log-card {
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 22px;

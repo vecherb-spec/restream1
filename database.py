@@ -250,6 +250,23 @@ def init_db() -> None:
             "DELETE FROM auth_sessions WHERE expires_at <= ?",
             (utc_now_iso(),),
         )
+        connection.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS password_reset_tokens (
+                id {user_id_definition},
+                user_id INTEGER NOT NULL,
+                token_hash TEXT NOT NULL UNIQUE,
+                expires_at TEXT NOT NULL,
+                used_at TEXT,
+                created_at TEXT NOT NULL DEFAULT {timestamp_default},
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            "DELETE FROM password_reset_tokens WHERE expires_at <= ? OR used_at IS NOT NULL",
+            (utc_now_iso(),),
+        )
 
         admin = connection.execute(
             "SELECT id FROM users WHERE username = ?",
@@ -403,6 +420,85 @@ def delete_auth_session(token: str) -> None:
             "DELETE FROM auth_sessions WHERE token_hash = ?",
             (hash_session_token(token),),
         )
+
+
+def create_password_reset_token(identifier: str) -> tuple[dict[str, Any] | None, str | None]:
+    """Create a password reset token for a username or email when the user exists."""
+
+    identifier = identifier.strip()
+    if not identifier:
+        return None, None
+
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT * FROM users
+            WHERE is_active = 1
+              AND (lower(username) = lower(?) OR lower(email) = lower(?))
+            """,
+            (identifier, identifier),
+        ).fetchone()
+        user = row_to_dict(row)
+        if user is None:
+            return None, None
+
+        token = secrets.token_urlsafe(32)
+        expires_at = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(timespec="seconds")
+        connection.execute(
+            "DELETE FROM password_reset_tokens WHERE user_id = ?",
+            (int(user["id"]),),
+        )
+        connection.execute(
+            """
+            INSERT INTO password_reset_tokens (user_id, token_hash, expires_at)
+            VALUES (?, ?, ?)
+            """,
+            (int(user["id"]), hash_session_token(token), expires_at),
+        )
+        return user, token
+
+
+def reset_password_with_token(token: str, new_password: str) -> tuple[bool, str]:
+    """Consume a password reset token and update the user's password."""
+
+    if len(new_password) < 8:
+        return False, "Новый пароль должен быть не короче 8 символов."
+    if not token:
+        return False, "Токен восстановления обязателен."
+
+    now = utc_now_iso()
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT password_reset_tokens.id AS token_id, users.id AS user_id
+            FROM password_reset_tokens
+            JOIN users ON users.id = password_reset_tokens.user_id
+            WHERE password_reset_tokens.token_hash = ?
+              AND password_reset_tokens.expires_at > ?
+              AND password_reset_tokens.used_at IS NULL
+              AND users.is_active = 1
+            """,
+            (hash_session_token(token), now),
+        ).fetchone()
+        if row is None:
+            return False, "Ссылка восстановления недействительна или истекла."
+
+        token_id = row["token_id"]
+        user_id = row["user_id"]
+        connection.execute(
+            "UPDATE users SET password = ? WHERE id = ?",
+            (hash_password(new_password), user_id),
+        )
+        connection.execute(
+            "UPDATE password_reset_tokens SET used_at = ? WHERE id = ?",
+            (now, token_id),
+        )
+        connection.execute(
+            "DELETE FROM auth_sessions WHERE user_id = ?",
+            (user_id,),
+        )
+
+    return True, "Пароль обновлен. Теперь можно войти с новым паролем."
 
 
 def create_database_backup() -> dict[str, Any]:

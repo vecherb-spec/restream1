@@ -15,11 +15,13 @@ import os
 import re
 import shutil
 import socket
+import smtplib
 import subprocess
 import threading
 import json
 import asyncio
 from datetime import datetime, timezone
+from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +38,7 @@ from database import (
     change_user_password,
     create_auth_session,
     create_database_backup,
+    create_password_reset_token,
     create_user,
     delete_auth_session,
     get_active_user_by_stream_key,
@@ -45,6 +48,7 @@ from database import (
     list_database_backups,
     list_users,
     regenerate_user_stream_key,
+    reset_password_with_token,
     set_user_active,
     update_user_plan,
     update_stream_title,
@@ -93,6 +97,13 @@ COOKIE_NAME = os.getenv("RESTREAM_COOKIE_NAME", "restream_session")
 COOKIE_MAX_AGE_SECONDS = int(os.getenv("RESTREAM_AUTH_SESSION_DAYS", "7")) * 24 * 60 * 60
 COOKIE_SECURE = os.getenv("RESTREAM_COOKIE_SECURE", "true").lower() == "true"
 COOKIE_DOMAIN = os.getenv("RESTREAM_COOKIE_DOMAIN", "").strip() or None
+PUBLIC_BASE_URL = os.getenv("RESTREAM_PUBLIC_URL", "https://restream.medialive.ru").rstrip("/")
+SMTP_HOST = os.getenv("RESTREAM_SMTP_HOST", "").strip()
+SMTP_PORT = int(os.getenv("RESTREAM_SMTP_PORT", "587"))
+SMTP_USERNAME = os.getenv("RESTREAM_SMTP_USERNAME", "").strip()
+SMTP_PASSWORD = os.getenv("RESTREAM_SMTP_PASSWORD", "").strip()
+SMTP_FROM = os.getenv("RESTREAM_SMTP_FROM", SMTP_USERNAME or "no-reply@restream.medialive.ru").strip()
+SMTP_USE_TLS = os.getenv("RESTREAM_SMTP_TLS", "true").lower() == "true"
 
 active_processes: dict[str, dict[str, Any]] = {}
 active_publishers: dict[str, dict[str, Any]] = {}
@@ -131,6 +142,15 @@ class RestreamSettingsPayload(BaseModel):
 
 class PasswordChangePayload(BaseModel):
     current_password: str
+    new_password: str
+
+
+class ForgotPasswordPayload(BaseModel):
+    identifier: str
+
+
+class PasswordResetPayload(BaseModel):
+    token: str
     new_password: str
 
 
@@ -235,6 +255,55 @@ def model_to_dict(model: BaseModel, exclude_unset: bool = False) -> dict[str, An
     if hasattr(model, "model_dump"):
         return model.model_dump(exclude_unset=exclude_unset)
     return model.dict(exclude_unset=exclude_unset)
+
+
+def password_reset_url(token: str) -> str:
+    """Build public password reset URL for the Next.js app."""
+
+    return f"{PUBLIC_BASE_URL}/?reset_token={token}"
+
+
+def send_password_reset_email(user: dict[str, Any], token: str) -> None:
+    """Send password reset email when SMTP is configured; otherwise log the link."""
+
+    email = str(user.get("email") or "").strip()
+    reset_url = password_reset_url(token)
+    if not email:
+        logger.info("Password reset requested for %s without email. Reset URL: %s", user.get("username"), reset_url)
+        return
+
+    if not SMTP_HOST:
+        logger.warning(
+            "SMTP is not configured. Password reset URL for %s <%s>: %s",
+            user.get("username"),
+            email,
+            reset_url,
+        )
+        return
+
+    message = EmailMessage()
+    message["Subject"] = "Восстановление пароля MediaLive"
+    message["From"] = SMTP_FROM
+    message["To"] = email
+    message.set_content(
+        "\n".join(
+            [
+                f"Здравствуйте, {user.get('username')}.",
+                "",
+                "Для восстановления пароля перейдите по ссылке:",
+                reset_url,
+                "",
+                "Ссылка действует 1 час. Если вы не запрашивали восстановление, просто проигнорируйте письмо.",
+            ]
+        )
+    )
+
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as smtp:
+        if SMTP_USE_TLS:
+            smtp.starttls()
+        if SMTP_USERNAME:
+            smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
+        smtp.send_message(message)
 
 
 def build_pending_user_settings(user: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
@@ -960,6 +1029,33 @@ def api_logout(
         delete_auth_session(token)
     clear_session_cookie(response)
     return {"code": 0, "message": "Logged out"}
+
+
+@app.post("/api/auth/forgot-password")
+def api_forgot_password(payload: ForgotPasswordPayload) -> dict[str, Any]:
+    """Request password reset email without revealing whether the account exists."""
+
+    user, token = create_password_reset_token(payload.identifier)
+    if user is not None and token is not None:
+        try:
+            send_password_reset_email(user, token)
+        except Exception:
+            logger.exception("Failed to send password reset email for %s", user.get("username"))
+
+    return {
+        "code": 0,
+        "message": "Если аккаунт найден, письмо восстановления отправлено на email.",
+    }
+
+
+@app.post("/api/auth/reset-password")
+def api_reset_password(payload: PasswordResetPayload) -> dict[str, Any]:
+    """Reset password using a valid email reset token."""
+
+    success, message = reset_password_with_token(payload.token, payload.new_password)
+    if not success:
+        raise HTTPException(status_code=400, detail=message)
+    return {"code": 0, "message": message}
 
 
 @app.get("/api/me")

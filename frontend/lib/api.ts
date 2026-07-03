@@ -192,6 +192,20 @@ export async function logout(token?: string) {
   return request<{ code: number }>("/api/auth/logout", { method: "POST" }, token);
 }
 
+export async function requestPasswordReset(identifier: string) {
+  return request<{ code: number; message: string }>("/api/auth/forgot-password", {
+    method: "POST",
+    body: JSON.stringify({ identifier }),
+  });
+}
+
+export async function resetPassword(token: string, newPassword: string) {
+  return request<{ code: number; message: string }>("/api/auth/reset-password", {
+    method: "POST",
+    body: JSON.stringify({ token, new_password: newPassword }),
+  });
+}
+
 export async function getMe(token?: string) {
   return request<{ code: number; user: User }>("/api/me", {}, token);
 }
@@ -226,6 +240,17 @@ export async function resetMyStreamKey(token?: string) {
   return request<{ code: number; message: string; stream_key: string; user?: User }>(
     "/api/me/stream-key",
     { method: "POST" },
+    token,
+  );
+}
+
+export async function changeMyPassword(currentPassword: string, newPassword: string, token?: string) {
+  return request<{ code: number; message: string }>(
+    "/api/me/password",
+    {
+      method: "POST",
+      body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+    },
     token,
   );
 }
