@@ -169,6 +169,16 @@ async function request<T>(
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
+    if (response.status === 404 && path.includes("/auth/forgot-password")) {
+      throw new Error(
+        "Сервис восстановления пароля не обновлён на сервере. Нужно обновить backend.",
+      );
+    }
+    if (response.status === 404 && path.includes("/auth/reset-password")) {
+      throw new Error(
+        "Сервис сброса пароля не обновлён на сервере. Нужно обновить backend.",
+      );
+    }
     throw new Error(payload.detail || payload.message || `HTTP ${response.status}`);
   }
   return payload as T;

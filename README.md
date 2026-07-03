@@ -30,6 +30,27 @@ NEXT_PUBLIC_OBS_SERVER_URL=rtmp://restream.medialive.ru/live
 NEXT_PUBLIC_HLS_BASE_URL=https://restream.medialive.ru/srs/live
 ```
 
+Password recovery requires **both** the Next.js frontend and the FastAPI
+backend from the same release. If the login page shows `Not Found` after
+submitting forgot-password, the production backend is still on an older build.
+
+Update the backend on the server:
+
+```bash
+chmod +x deploy/scripts/update_backend.sh
+RESTREAM_REPO_DIR=/opt/restream RESTREAM_DEPLOY_BRANCH=main ./deploy/scripts/update_backend.sh
+```
+
+Then verify:
+
+```bash
+curl -i -X POST https://restream.medialive.ru/api/auth/forgot-password \
+  -H "Content-Type: application/json" \
+  -d '{"identifier":"your_login_or_email"}'
+```
+
+A healthy deployment returns HTTP `200` with `{"code":0,...}` instead of `404`.
+
 The frontend uses an HttpOnly `restream_session` cookie set by FastAPI. Useful
 backend cookie variables:
 
