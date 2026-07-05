@@ -891,7 +891,7 @@ function ClientProfile({ user }: { user: User }) {
           </div>
           <div className="metric">
             Площадок
-            <strong>до {user.max_destinations ?? 1}</strong>
+            <strong>до {getEffectiveMaxDestinations(user)}</strong>
           </div>
         </div>
         <p className="muted">
