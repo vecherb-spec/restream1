@@ -391,6 +391,7 @@ function SettingsForm({
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [savingPlatform, setSavingPlatform] = useState<PlatformId | null>(null);
+  const [savingCredentials, setSavingCredentials] = useState(false);
   const enabledDestinations = countEnabledDestinations(settings);
   const maxDestinations = user.max_destinations ?? 1;
   const streamIsOnAir = Boolean(
@@ -434,6 +435,21 @@ function SettingsForm({
     }
   }
 
+  async function savePlatformCredentials() {
+    setError("");
+    setMessage("");
+    setSavingCredentials(true);
+    try {
+      const response = await updateSettings(settings);
+      onSaved(response.user);
+      setMessage("URL и ключи сохранены.");
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Не удалось сохранить настройки");
+    } finally {
+      setSavingCredentials(false);
+    }
+  }
+
   return (
     <aside className="channels-panel">
       <div className="channels-tabs">
@@ -447,6 +463,12 @@ function SettingsForm({
           {enabledDestinations}/{maxDestinations}
         </strong>
       </div>
+      {enabledDestinations >= maxDestinations && maxDestinations <= 1 && (
+        <div className="alert">
+          На тарифе «{user.plan || "free"}» одновременно активна {maxDestinations} площадка. Чтобы включить
+          другую — нажмите Stop на текущей (например YouTube), затем Start на нужной.
+        </div>
+      )}
 
       {platformConfigs.map((platform) => {
         const active = Boolean(settings[platform.activeKey]);
@@ -458,7 +480,7 @@ function SettingsForm({
           !active &&
           configured &&
           countEnabledDestinations({ ...settings, [platform.activeKey]: true }) > maxDestinations;
-        const disabled = savingPlatform === platform.id || startWouldExceedLimit;
+        const disabled = savingPlatform === platform.id;
         return (
           <div className={`platform-row ${live ? "live" : active ? "enabled" : ""}`} key={platform.id}>
             <div className="platform-state">
@@ -491,14 +513,26 @@ function SettingsForm({
             >
               {savingPlatform === platform.id ? "..." : active ? "Stop" : "Start"}
             </button>
+            {!active && !configured && (
+              <small className="platform-reason">Заполните RTMP URL и stream key, затем Start.</small>
+            )}
+            {startWouldExceedLimit && (
+              <small className="platform-reason">
+                Лимит {maxDestinations} площ. — сначала Stop на другой включённой площадке.
+              </small>
+            )}
           </div>
         );
       })}
 
       {error && <div className="error">{error}</div>}
       {message && <div className="alert">{message}</div>}
+      <button className="button secondary" disabled={savingCredentials} onClick={savePlatformCredentials}>
+        {savingCredentials ? "Сохранение..." : "Сохранить URL и ключи"}
+      </button>
       <p className="muted channel-footnote">
-        Поля сохраняются сразу при Start/Stop. Красный индикатор означает, что площадка в эфире.
+        Start включает площадку в рестрим. Счётчик {enabledDestinations}/{maxDestinations} — сколько
+        площадок можно включить одновременно по тарифу.
       </p>
     </aside>
   );
