@@ -50,6 +50,13 @@ DEFAULT_CLIENT_PLAN = os.getenv("RESTREAM_DEFAULT_CLIENT_PLAN", "free")
 DEFAULT_MAX_DESTINATIONS = int(os.getenv("RESTREAM_DEFAULT_MAX_DESTINATIONS", "1"))
 ADMIN_MAX_DESTINATIONS = int(os.getenv("RESTREAM_ADMIN_MAX_DESTINATIONS", "99"))
 
+PLAN_DESTINATION_LIMITS = {
+    "free": DEFAULT_MAX_DESTINATIONS,
+    "basic": 3,
+    "pro": 5,
+    "admin": ADMIN_MAX_DESTINATIONS,
+}
+
 logger = logging.getLogger("restream.database")
 
 
@@ -354,6 +361,16 @@ def init_db() -> None:
             """,
             (ADMIN_MAX_DESTINATIONS, DEFAULT_ADMIN_USERNAME),
         )
+        for plan_name, limit in PLAN_DESTINATION_LIMITS.items():
+            connection.execute(
+                """
+                UPDATE users
+                SET max_destinations = ?
+                WHERE lower(plan) = ?
+                  AND max_destinations < ?
+                """,
+                (limit, plan_name, limit),
+            )
 
 
 def create_user(username: str, password: str, email: str) -> tuple[bool, str, dict[str, Any] | None]:
@@ -791,10 +808,15 @@ def get_enabled_platform_names(user: dict[str, Any]) -> list[str]:
 def get_user_destination_limit(user: dict[str, Any]) -> int:
     """Return max allowed active restream destinations for a user."""
 
+    plan = str(user.get("plan") or DEFAULT_CLIENT_PLAN).strip().lower()
+    plan_default = PLAN_DESTINATION_LIMITS.get(plan, DEFAULT_MAX_DESTINATIONS)
     try:
-        return max(0, int(user.get("max_destinations") or DEFAULT_MAX_DESTINATIONS))
+        stored = int(user.get("max_destinations") or 0)
     except (TypeError, ValueError):
-        return DEFAULT_MAX_DESTINATIONS
+        stored = 0
+    if stored > plan_default:
+        return stored
+    return plan_default
 
 
 def count_enabled_destinations(user_or_settings: dict[str, Any]) -> int:

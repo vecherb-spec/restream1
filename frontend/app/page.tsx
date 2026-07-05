@@ -225,6 +225,13 @@ const planPresets = [
   { plan: "admin", maxDestinations: 99, title: "Admin" },
 ] as const;
 
+function getEffectiveMaxDestinations(user: User) {
+  const preset = planPresets.find((item) => item.plan === (user.plan || "free"));
+  const planLimit = preset?.maxDestinations ?? 1;
+  const stored = user.max_destinations ?? 1;
+  return Math.max(stored, planLimit);
+}
+
 function AuthCard({
   onAuthenticated,
   initialResetToken = "",
@@ -393,7 +400,7 @@ function SettingsForm({
   const [savingPlatform, setSavingPlatform] = useState<PlatformId | null>(null);
   const [savingCredentials, setSavingCredentials] = useState(false);
   const enabledDestinations = countEnabledDestinations(settings);
-  const maxDestinations = user.max_destinations ?? 1;
+  const maxDestinations = getEffectiveMaxDestinations(user);
   const streamIsOnAir = Boolean(
     streamStatus?.publisher || streamStatus?.process?.status === "running",
   );
@@ -569,7 +576,7 @@ function BroadcastTopbar({
         <div>
           <strong>{user.username}</strong>
           <small>
-            {user.plan || "free"} · до {user.max_destinations ?? 1} каналов
+            {user.plan || "free"} · до {getEffectiveMaxDestinations(user)} каналов
           </small>
         </div>
         <div className="actions">
