@@ -61,6 +61,23 @@ def normalize_database_url(url: str) -> str:
     return url
 
 
+class PostgresCursor:
+    """Expose sqlite-style cursor helpers over psycopg results."""
+
+    def __init__(self, cursor: Any) -> None:
+        self._cursor = cursor
+
+    @property
+    def rowcount(self) -> int:
+        return int(self._cursor.rowcount)
+
+    def fetchone(self) -> Any:
+        return self._cursor.fetchone()
+
+    def fetchall(self) -> list[Any]:
+        return self._cursor.fetchall()
+
+
 class PostgresConnection:
     """Small compatibility wrapper around psycopg connections.
 
@@ -83,8 +100,9 @@ class PostgresConnection:
             row_factory=dict_row,
         )
 
-    def execute(self, query: str, parameters: tuple[Any, ...] | list[Any] = ()) -> Any:
-        return self._connection.execute(query.replace("?", "%s"), parameters)
+    def execute(self, query: str, parameters: tuple[Any, ...] | list[Any] = ()) -> PostgresCursor:
+        cursor = self._connection.execute(query.replace("?", "%s"), parameters)
+        return PostgresCursor(cursor)
 
     def commit(self) -> None:
         self._connection.commit()
@@ -203,6 +221,18 @@ def ensure_column(
 
     if not column_exists(connection, table, column):
         connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def check_database() -> tuple[bool, str]:
+    """Verify that the configured database is reachable."""
+
+    try:
+        with get_connection() as connection:
+            connection.execute("SELECT 1").fetchone()
+        return True, DATABASE_BACKEND
+    except Exception as exc:
+        logger.exception("Database health check failed")
+        return False, str(exc)
 
 
 def init_db() -> None:
@@ -852,4 +882,7 @@ def get_enabled_destinations(user: dict[str, Any]) -> list[str]:
     return [destination for destination in destinations if destination]
 
 
-init_db()
+try:
+    init_db()
+except Exception:
+    logger.exception("Database initialization failed during import")

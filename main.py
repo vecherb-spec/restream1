@@ -50,12 +50,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
+from starlette.requests import Request as StarletteRequest
 
 from database import (
     DATABASE_BACKEND,
     DATABASE_PATH,
     authenticate_user,
     change_user_password,
+    check_database,
     create_auth_session,
     create_database_backup,
     create_password_reset_token,
@@ -65,6 +67,7 @@ from database import (
     get_enabled_destinations,
     get_user_by_id,
     get_user_by_session_token,
+    init_db,
     list_database_backups,
     list_users,
     regenerate_user_stream_key,
@@ -105,6 +108,34 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+def on_startup() -> None:
+    """Ensure schema migrations run after the app process starts."""
+
+    try:
+        init_db()
+        ok, detail = check_database()
+        if ok:
+            logger.info("Database ready (%s)", detail)
+        else:
+            logger.error("Database is unavailable on startup: %s", detail)
+    except Exception:
+        logger.exception("Database startup check failed")
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(_request: StarletteRequest, exc: HTTPException) -> JSONResponse:
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: StarletteRequest, exc: Exception) -> JSONResponse:
+    """Log unexpected server errors instead of failing silently."""
+
+    logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
 SRS_INPUT_URL_TEMPLATE = os.getenv(
     "SRS_INPUT_URL_TEMPLATE",
@@ -1440,9 +1471,20 @@ def api_admin_create_backup(_admin: dict[str, Any] = Depends(get_current_admin))
 def health() -> dict[str, Any]:
     """Simple readiness endpoint."""
 
+    db_ok, db_detail = check_database()
     with process_lock:
         active_count = len(active_processes)
-    return {"status": "ok", "active_streams": active_count}
+    status = "ok" if db_ok else "degraded"
+    return {
+        "status": status,
+        "active_streams": active_count,
+        "database": {
+            "ok": db_ok,
+            "backend": DATABASE_BACKEND,
+            "detail": db_detail,
+            "path": str(DATABASE_PATH),
+        },
+    }
 
 
 @app.post("/on_publish")

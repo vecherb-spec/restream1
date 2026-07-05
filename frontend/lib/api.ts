@@ -240,7 +240,7 @@ export async function updateSettings(settings: RestreamSettings, token?: string)
 
 export async function updateStreamTitle(streamTitle: string, token?: string) {
   return request<{ code: number; message: string; user: User }>(
-    "/api/me/settings",
+    "/api/me/stream-title",
     {
       method: "PUT",
       body: JSON.stringify({ stream_title: streamTitle }),
