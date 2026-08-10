@@ -45,12 +45,38 @@ export type StreamStatus = {
 export type PlatformStatus = {
   id: string;
   title: string;
+  destination_type?: string;
   active: boolean;
   configured: boolean;
-  state: "not_configured" | "stopped" | "waiting_input" | "live" | "error" | "starting";
+  state:
+    | "not_configured"
+    | "stopped"
+    | "waiting_input"
+    | "live"
+    | "error"
+    | "starting"
+    | "reconnecting"
+    | "stopping";
   label: string;
   color: "gray" | "red" | "yellow" | "green";
   reason?: string;
+  uptime_seconds?: number | null;
+  session_uptime_seconds?: number | null;
+  worker_pid?: number | null;
+  bitrate?: string | null;
+  bitrate_kbps?: number | null;
+  width?: number | null;
+  height?: number | null;
+  resolution?: string | null;
+  fps?: number | null;
+  restart_count?: number;
+  reconnect_count?: number;
+  last_error?: string | null;
+  last_error_at?: string | null;
+  last_progress_at?: string | null;
+  progress_age_seconds?: number | null;
+  next_restart_in_seconds?: number | null;
+  worker_state?: string | null;
 };
 
 export type RestreamSettings = {

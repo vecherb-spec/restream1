@@ -217,6 +217,10 @@ active_publishers: dict[str, dict[str, Any]] = {}
 recent_processes: list[dict[str, Any]] = []
 ffmpeg_restart_events: dict[str, list[float]] = {}
 ffmpeg_worker_generations: dict[str, int] = {}
+# Per-destination operator telemetry (never contains stream keys / RTMP secrets).
+ffmpeg_worker_telemetry: dict[str, dict[str, Any]] = {}
+# In-flight auto-restart countdowns keyed by worker_key.
+ffmpeg_pending_restarts: dict[str, dict[str, Any]] = {}
 process_lock = threading.Lock()
 auth_rate_lock = threading.Lock()
 auth_rate_buckets: dict[str, list[float]] = {}
@@ -757,6 +761,90 @@ def parse_ffmpeg_progress(progress_path: str | Path | None) -> dict[str, Any]:
     return metrics
 
 
+def parse_bitrate_kbps(bitrate: str | None) -> float | None:
+    """Parse FFmpeg bitrate strings into kbps. Return None when unknown (never invent 0)."""
+
+    text = (bitrate or "").strip().lower()
+    if not text or text in {"n/a", "na", "unknown", "null"}:
+        return None
+    match = re.match(r"^([0-9]+(?:\.[0-9]+)?)\s*([kmg]?bits?/s|[kmg]?b/?s)?$", text)
+    if not match:
+        return None
+    value = float(match.group(1))
+    unit = (match.group(2) or "kbits/s").replace("/", "")
+    if unit.startswith("g"):
+        return value * 1_000_000
+    if unit.startswith("m"):
+        return value * 1_000
+    if unit.startswith("k"):
+        return value
+    return value / 1000.0
+
+
+def parse_resolution_wh(resolution: str | None) -> tuple[int | None, int | None]:
+    """Parse '1920x1080' into width/height."""
+
+    text = (resolution or "").strip().lower()
+    match = re.match(r"^([0-9]{2,5})\s*[x×]\s*([0-9]{2,5})$", text)
+    if not match:
+        return None, None
+    return int(match.group(1)), int(match.group(2))
+
+
+def uptime_seconds_from_iso(started_at: str | None) -> int | None:
+    """Return whole seconds since started_at, or None when unavailable."""
+
+    if not started_at:
+        return None
+    try:
+        started = datetime.fromisoformat(started_at)
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        return max(0, int((datetime.now(timezone.utc) - started).total_seconds()))
+    except ValueError:
+        return None
+
+
+def worker_telemetry(worker_key: str) -> dict[str, Any]:
+    """Return mutable telemetry dict for one destination worker."""
+
+    telemetry = ffmpeg_worker_telemetry.get(worker_key)
+    if telemetry is None:
+        telemetry = {
+            "restart_count": 0,
+            "reconnect_count": 0,
+            "last_error": None,
+            "last_error_at": None,
+            "session_started_at": None,
+        }
+        ffmpeg_worker_telemetry[worker_key] = telemetry
+    return telemetry
+
+
+def record_worker_error(worker_key: str, error: str) -> None:
+    """Store last error for one destination without touching other workers."""
+
+    telemetry = worker_telemetry(worker_key)
+    telemetry["last_error"] = (error or "unknown error")[:300]
+    telemetry["last_error_at"] = utc_now_iso()
+
+
+def clear_worker_pending_restart(worker_key: str) -> None:
+    """Clear scheduled auto-restart countdown for a worker."""
+
+    ffmpeg_pending_restarts.pop(worker_key, None)
+
+
+def set_worker_pending_restart(worker_key: str, delay_seconds: float, reason: str) -> None:
+    """Publish next auto-restart time for dashboard countdown."""
+
+    ffmpeg_pending_restarts[worker_key] = {
+        "next_restart_at": datetime.now(timezone.utc).timestamp() + max(0.0, delay_seconds),
+        "delay_seconds": max(0.0, delay_seconds),
+        "reason": reason[:200],
+    }
+
+
 def process_snapshot(worker_key: str, entry: dict[str, Any]) -> dict[str, Any]:
     """Serialize one destination worker entry for APIs."""
 
@@ -768,6 +856,25 @@ def process_snapshot(worker_key: str, entry: dict[str, Any]) -> dict[str, Any]:
     progress = parse_ffmpeg_progress(progress_path)
     stream_key = str(entry.get("stream_key") or split_worker_key(worker_key)[0])
     platform_id = str(entry.get("platform_id") or split_worker_key(worker_key)[1])
+
+    marker = progress.get("out_time_ms")
+    if marker is not None and marker != entry.get("last_progress_marker"):
+        entry["last_progress_marker"] = marker
+        entry["last_progress_at"] = utc_now_iso()
+
+    telemetry = worker_telemetry(worker_key)
+    bitrate_raw = str(progress.get("bitrate") or "").strip()
+    bitrate_kbps = parse_bitrate_kbps(bitrate_raw)
+    width, height = parse_resolution_wh(str(entry.get("resolution") or ""))
+    started_at = str(entry.get("started_at") or "")
+    last_progress_at = str(entry.get("last_progress_at") or "") or None
+    progress_age = uptime_seconds_from_iso(last_progress_at) if last_progress_at else None
+
+    pending = ffmpeg_pending_restarts.get(worker_key) or {}
+    next_restart_in = None
+    if pending.get("next_restart_at") is not None:
+        next_restart_in = max(0, int(float(pending["next_restart_at"]) - time.time()))
+
     return {
         "worker_key": worker_key,
         "stream_key": stream_key,
@@ -776,17 +883,30 @@ def process_snapshot(worker_key: str, entry: dict[str, Any]) -> dict[str, Any]:
         "pid": process.pid,
         "status": "running" if return_code is None else "exited",
         "return_code": return_code,
-        "started_at": entry.get("started_at"),
+        "started_at": started_at or None,
+        "uptime_seconds": uptime_seconds_from_iso(started_at),
+        "session_uptime_seconds": uptime_seconds_from_iso(str(telemetry.get("session_started_at") or "")),
         "destinations": entry.get("destinations", 0),
         "log_path": str(entry.get("log_path") or ""),
         "progress_path": str(progress_path or ""),
         "frame": progress["frame"],
         "fps": progress["fps"],
-        "bitrate": progress["bitrate"],
-        "speed": progress["speed"],
+        "bitrate": bitrate_raw or None,
+        "bitrate_kbps": bitrate_kbps,
+        "speed": progress["speed"] or None,
         "dropped_frames": progress["dropped_frames"],
-        "resolution": entry.get("resolution") or "",
+        "resolution": entry.get("resolution") or None,
+        "width": width,
+        "height": height,
         "progress": progress["progress"],
+        "restart_count": int(telemetry.get("restart_count") or 0),
+        "reconnect_count": int(telemetry.get("reconnect_count") or 0),
+        "last_error": telemetry.get("last_error"),
+        "last_error_at": telemetry.get("last_error_at"),
+        "last_progress_at": last_progress_at,
+        "progress_age_seconds": progress_age,
+        "next_restart_in_seconds": next_restart_in,
+        "worker_state": "stopping" if entry.get("stopping") else ("running" if return_code is None else "exited"),
     }
 
 
@@ -882,21 +1002,27 @@ def build_platform_statuses(
     workers_by_platform: dict[str, dict[str, Any]],
     recent_by_platform: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Build client-facing per-platform status labels."""
+    """Build client-facing per-platform status with destination-local metrics."""
 
     if user is None:
         return []
 
     statuses: list[dict[str, Any]] = []
+    stream_key = str(user.get("stream_key") or "")
     for config in PLATFORM_STATUS_CONFIGS:
         platform_id = str(config["id"])
         worker = workers_by_platform.get(platform_id)
         recent = recent_by_platform.get(platform_id)
+        worker_key = worker_key_for(stream_key, platform_id) if stream_key else ""
+        telemetry = worker_telemetry(worker_key) if worker_key else {}
+        pending = ffmpeg_pending_restarts.get(worker_key) if worker_key else None
         worker_running = bool(worker and worker.get("status") == "running")
+        worker_stopping = bool(worker and worker.get("worker_state") == "stopping")
         worker_exited = bool(worker and worker.get("status") == "exited")
         recent_failed = bool(recent and recent.get("return_code") not in {None, 0})
         active = bool(user.get(config["active_field"]))
         configured = platform_configured(user, config)
+        source = worker or recent or {}
 
         if not configured:
             state = "not_configured"
@@ -913,32 +1039,74 @@ def build_platform_statuses(
             label = "Ждет VideoCoder"
             color = "yellow"
             reason = "Входящий поток пока не опубликован в SRS."
+        elif worker_stopping:
+            state = "stopping"
+            label = "Останавливается"
+            color = "yellow"
+            reason = ""
+        elif pending and not worker_running:
+            state = "reconnecting"
+            label = "Переподключение"
+            color = "yellow"
+            reason = str(pending.get("reason") or telemetry.get("last_error") or "Автоперезапуск worker")
         elif worker_running:
             state = "live"
             label = "В эфире"
             color = "green"
             reason = ""
-        elif worker_exited or recent_failed:
+        elif worker_exited or recent_failed or telemetry.get("last_error"):
             state = "error"
             label = "Ошибка"
             color = "red"
-            reason = "FFmpeg завершился. Откройте ошибки рестрима."
+            reason = str(telemetry.get("last_error") or "FFmpeg завершился. Откройте ошибки рестрима.")
         else:
             state = "starting"
             label = "Запускается"
             color = "yellow"
             reason = "FFmpeg еще не отдал статус."
 
+        next_restart_in = None
+        if pending and pending.get("next_restart_at") is not None:
+            next_restart_in = max(0, int(float(pending["next_restart_at"]) - time.time()))
+
+        # Never expose stream keys / RTMP URLs here — only operator metrics.
         statuses.append(
             {
                 "id": config["id"],
                 "title": config["title"],
+                "destination_type": config["id"],
                 "active": active,
                 "configured": configured,
                 "state": state,
                 "label": label,
                 "color": color,
                 "reason": reason,
+                "uptime_seconds": source.get("uptime_seconds"),
+                "session_uptime_seconds": source.get("session_uptime_seconds")
+                or uptime_seconds_from_iso(str(telemetry.get("session_started_at") or "")),
+                "worker_pid": source.get("pid"),
+                "bitrate": source.get("bitrate"),
+                "bitrate_kbps": source.get("bitrate_kbps"),
+                "width": source.get("width"),
+                "height": source.get("height"),
+                "resolution": source.get("resolution"),
+                "fps": source.get("fps"),
+                "restart_count": int(
+                    source.get("restart_count")
+                    if source.get("restart_count") is not None
+                    else telemetry.get("restart_count") or 0
+                ),
+                "reconnect_count": int(
+                    source.get("reconnect_count")
+                    if source.get("reconnect_count") is not None
+                    else telemetry.get("reconnect_count") or 0
+                ),
+                "last_error": telemetry.get("last_error") or source.get("last_error"),
+                "last_error_at": telemetry.get("last_error_at") or source.get("last_error_at"),
+                "last_progress_at": source.get("last_progress_at"),
+                "progress_age_seconds": source.get("progress_age_seconds"),
+                "next_restart_in_seconds": next_restart_in,
+                "worker_state": source.get("worker_state") or state,
             }
         )
 
@@ -1526,6 +1694,10 @@ def adopt_ffmpeg_worker(worker: dict[str, Any]) -> bool:
     generation = bump_ffmpeg_generation(worker_key)
 
     with process_lock:
+        telemetry = worker_telemetry(worker_key)
+        if not telemetry.get("session_started_at"):
+            telemetry["session_started_at"] = published_at
+        clear_worker_pending_restart(worker_key)
         active_processes[worker_key] = {
             "worker_key": worker_key,
             "stream_key": stream_key,
@@ -1744,12 +1916,15 @@ def stop_worker(
 
     bump_ffmpeg_generation(worker_key)
     with process_lock:
+        clear_worker_pending_restart(worker_key)
+        entry = active_processes.get(worker_key)
+        if entry is not None:
+            entry["stopping"] = True
         entry = active_processes.pop(worker_key, None)
 
     if entry is None:
         return False
 
-    stream_key = str(entry.get("stream_key") or split_worker_key(worker_key)[0])
     process: Any = entry["process"]
     return_code = process.poll()
     if return_code is not None:
@@ -1812,13 +1987,25 @@ def clear_ffmpeg_restart_state(stream_key: str) -> None:
     """Reset FFmpeg auto-restart counters when a publish session ends."""
 
     with process_lock:
-        keys = [
+        keys = {
             worker_key
-            for worker_key in ffmpeg_restart_events
+            for worker_key in list(ffmpeg_restart_events)
             if worker_key_matches_stream(worker_key, stream_key)
-        ]
+        }
+        keys.update(
+            worker_key
+            for worker_key in list(ffmpeg_pending_restarts)
+            if worker_key_matches_stream(worker_key, stream_key)
+        )
+        keys.update(
+            worker_key
+            for worker_key in list(ffmpeg_worker_telemetry)
+            if worker_key_matches_stream(worker_key, stream_key)
+        )
         for worker_key in keys:
             ffmpeg_restart_events.pop(worker_key, None)
+            clear_worker_pending_restart(worker_key)
+            ffmpeg_worker_telemetry.pop(worker_key, None)
 
 
 def next_restart_delay_seconds(worker_key: str, *, consume: bool = True) -> float | None:
@@ -1890,6 +2077,10 @@ def maybe_restart_ffmpeg(worker_key: str, return_code: int) -> None:
     # Preview budget first so aborted restarts do not burn the rolling window.
     delay = next_restart_delay_seconds(worker_key, consume=False)
     if delay is None:
+        record_worker_error(
+            worker_key,
+            f"temporarily disabled: >{FFMPEG_MAX_RESTARTS} restarts in {int(FFMPEG_RESTART_WINDOW_SECONDS)}s",
+        )
         logger.error(
             "FFmpeg worker %s exceeded %s restarts in %ss; temporarily disabled",
             worker_key,
@@ -1916,10 +2107,18 @@ def maybe_restart_ffmpeg(worker_key: str, return_code: int) -> None:
     if destination is None:
         return
 
+    with process_lock:
+        set_worker_pending_restart(
+            worker_key,
+            delay,
+            f"auto-restart after exit code {return_code}",
+        )
+
     if delay:
         time.sleep(delay)
 
     with process_lock:
+        clear_worker_pending_restart(worker_key)
         if stream_key not in active_publishers:
             return
         if ffmpeg_worker_generations.get(worker_key, 0) != generation_before_sleep:
@@ -1933,6 +2132,10 @@ def maybe_restart_ffmpeg(worker_key: str, return_code: int) -> None:
     if next_restart_delay_seconds(worker_key, consume=True) is None:
         return
 
+    with process_lock:
+        telemetry = worker_telemetry(worker_key)
+        telemetry["restart_count"] = int(telemetry.get("restart_count") or 0) + 1
+
     logger.warning(
         "Restarting FFmpeg worker %s after exit code %s (backoff %.1fs)",
         worker_key,
@@ -1941,7 +2144,8 @@ def maybe_restart_ffmpeg(worker_key: str, return_code: int) -> None:
     )
     try:
         start_ffmpeg_worker(stream_key, destination)
-    except Exception:
+    except Exception as exc:
+        record_worker_error(worker_key, f"auto-restart failed: {exc}")
         logger.exception("Failed to auto-restart FFmpeg worker %s", worker_key)
 
 
@@ -1963,6 +2167,10 @@ def monitor_process(worker_key: str, process: Any) -> None:
     if return_code == 0:
         logger.info("FFmpeg worker %s finished successfully", worker_key)
     elif unexpected_exit:
+        with process_lock:
+            telemetry = worker_telemetry(worker_key)
+            telemetry["reconnect_count"] = int(telemetry.get("reconnect_count") or 0) + 1
+        record_worker_error(worker_key, f"FFmpeg exited with code {return_code}")
         logger.error("FFmpeg worker %s exited with code %s", worker_key, return_code)
         maybe_restart_ffmpeg(worker_key, return_code)
     else:
@@ -2017,6 +2225,11 @@ def watch_ffmpeg_stall(
             last_marker = marker
             last_change = now
             frozen_samples = 0
+            with process_lock:
+                current = active_processes.get(worker_key)
+                if current and current.get("process") is process:
+                    current["last_progress_marker"] = marker
+                    current["last_progress_at"] = utc_now_iso()
         elif saw_progress:
             frozen_samples += 1
             if (
@@ -2152,6 +2365,11 @@ def start_ffmpeg_worker(stream_key: str, destination: dict[str, str]) -> bool:
             except OSError:
                 pass
             return False
+        started_at = utc_now_iso()
+        telemetry = worker_telemetry(worker_key)
+        if not telemetry.get("session_started_at"):
+            telemetry["session_started_at"] = started_at
+        clear_worker_pending_restart(worker_key)
         active_processes[worker_key] = {
             "worker_key": worker_key,
             "stream_key": stream_key,
@@ -2159,7 +2377,7 @@ def start_ffmpeg_worker(stream_key: str, destination: dict[str, str]) -> bool:
             "platform_title": destination.get("title") or platform_title(platform_id),
             "destination_url": destination_url,
             "process": process,
-            "started_at": utc_now_iso(),
+            "started_at": started_at,
             "destinations": 1,
             "log_path": log_path,
             "progress_path": progress_path,

@@ -6,6 +6,7 @@ import {
   AdminLiveDashboard,
   BackupInfo,
   OBS_SERVER_URL,
+  PlatformStatus,
   RestreamSettings,
   StreamProcess,
   StreamPublisher,
@@ -191,7 +192,7 @@ function isPlatformConfigured(platform: PlatformConfig, settings: RestreamSettin
 }
 
 function metricValue(value?: string | number | null) {
-  return value == null || value === "" ? "-" : value;
+  return value == null || value === "" ? "N/A" : value;
 }
 
 function displayStatusLabel(label?: string) {
@@ -206,6 +207,57 @@ function displayStatusLabel(label?: string) {
 
 function getPlatformStatus(status: StreamStatus | null, platformId: PlatformId) {
   return status?.platform_statuses?.find((item) => item.id === platformId);
+}
+
+function formatUptime(seconds?: number | null) {
+  if (seconds == null || Number.isNaN(seconds)) {
+    return "N/A";
+  }
+  const total = Math.max(0, Math.floor(seconds));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  return [hours, minutes, secs].map((part) => String(part).padStart(2, "0")).join(":");
+}
+
+function formatBitrate(status?: PlatformStatus | null) {
+  if (!status) {
+    return "N/A";
+  }
+  if (status.bitrate_kbps == null) {
+    return "N/A";
+  }
+  if (status.bitrate_kbps >= 1000) {
+    return `${(status.bitrate_kbps / 1000).toFixed(1)} Mbps`;
+  }
+  return `${Math.round(status.bitrate_kbps)} kbps`;
+}
+
+function formatResolutionFps(status?: PlatformStatus | null) {
+  if (!status) {
+    return "N/A";
+  }
+  const resolution =
+    status.resolution ||
+    (status.width && status.height ? `${status.width}×${status.height}` : null);
+  const fps = status.fps == null ? null : `${Number(status.fps).toFixed(status.fps % 1 ? 1 : 0)} FPS`;
+  if (!resolution && !fps) {
+    return "N/A";
+  }
+  if (resolution && fps) {
+    return `${resolution} • ${fps}`;
+  }
+  return String(resolution || fps);
+}
+
+function formatProgressAge(seconds?: number | null) {
+  if (seconds == null) {
+    return "N/A";
+  }
+  if (seconds < 60) {
+    return `${seconds} sec ago`;
+  }
+  return `${formatUptime(seconds)} ago`;
 }
 
 function maskSecret(value: string) {
@@ -478,6 +530,7 @@ function SettingsForm({
         const configured = isPlatformConfigured(platform, settings);
         const platformStatus = getPlatformStatus(streamStatus, platform.id);
         const live = platformStatus?.state === "live";
+        const reconnecting = platformStatus?.state === "reconnecting";
         const stateClass = platformStatus?.color || (active ? "yellow" : "gray");
         const startWouldExceedLimit =
           !active &&
@@ -485,7 +538,10 @@ function SettingsForm({
           countEnabledDestinations({ ...settings, [platform.activeKey]: true }) > maxDestinations;
         const disabled = platformsBusy || startWouldExceedLimit;
         return (
-          <div className={`platform-row ${live ? "live" : active ? "enabled" : ""}`} key={platform.id}>
+          <div
+            className={`platform-row ${live ? "live" : reconnecting ? "reconnecting" : active ? "enabled" : ""}`}
+            key={platform.id}
+          >
             <div className="platform-state">
               <span className={`platform-live-dot ${stateClass}`} />
               <div>
@@ -494,8 +550,32 @@ function SettingsForm({
                   {platformStatus?.label ||
                     (active ? "Включена, ждет VideoCoder" : "Остановлена")}
                 </small>
-                {platformStatus?.reason && <small className="platform-reason">{platformStatus.reason}</small>}
               </div>
+            </div>
+            <div className="platform-metrics">
+              <span>{formatResolutionFps(platformStatus)}</span>
+              <span>{formatBitrate(platformStatus)}</span>
+              <span>Uptime: {formatUptime(platformStatus?.uptime_seconds)}</span>
+              <span>
+                Restarts: {platformStatus?.restart_count ?? 0} • Reconnects:{" "}
+                {platformStatus?.reconnect_count ?? 0}
+              </span>
+              <span>Last progress: {formatProgressAge(platformStatus?.progress_age_seconds)}</span>
+              {platformStatus?.worker_pid != null && (
+                <span>PID: {platformStatus.worker_pid}</span>
+              )}
+              {platformStatus?.state === "reconnecting" &&
+                platformStatus.next_restart_in_seconds != null && (
+                  <span className="platform-next-restart">
+                    Next restart: {platformStatus.next_restart_in_seconds} sec
+                  </span>
+                )}
+              {platformStatus?.last_error && (
+                <span className="platform-reason">
+                  Last error: {platformStatus.last_error}
+                  {platformStatus.last_error_at ? ` (${platformStatus.last_error_at})` : ""}
+                </span>
+              )}
             </div>
             <input
               placeholder="RTMP URL"
