@@ -357,15 +357,23 @@ PostgreSQL integration tests (real Postgres via Compose overlay):
 
 ```bash
 cd /opt/restream   # or your clone path
-python3 -m pip install -r requirements.txt pytest
+
+# If git pull complains about deploy/srs/srs.conf (rendered secret file):
+cp deploy/srs/srs.conf /tmp/srs.conf.bak
+git checkout -- deploy/srs/srs.conf 2>/dev/null || true
+git pull origin cursor/restream-mvp-3225
+# restore/re-render production SRS config afterwards:
+# cp /tmp/srs.conf.bak deploy/srs/srs.conf
+# or: ./deploy/scripts/render_srs_conf.sh
+
+apt-get install -y python3-venv docker-compose-v2   # once
 ./deploy/scripts/run_postgres_tests.sh
 ```
 
-Do **not** run bare `docker` / bare `pytest` — use the script (it calls
-`docker compose ...` and `python3 -m pytest`).
+The script creates `.venv-tests` automatically (PEP 668 safe) and supports both
+`docker compose` and legacy `docker-compose`.
 
-This starts `postgres` from `docker-compose.yml` + `docker-compose.test.yml`
-(`restream_test` on `127.0.0.1:5432`) and runs `tests/test_postgres_integration.py`.
+Do **not** run bare `docker` / bare `pytest`.
 
 ## Troubleshooting
 
