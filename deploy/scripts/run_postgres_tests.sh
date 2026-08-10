@@ -8,7 +8,19 @@ REPO_DIR="${RESTREAM_REPO_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
 cd "$REPO_DIR"
 
 if ! command -v docker >/dev/null 2>&1; then
-  echo "Docker CLI is not installed." >&2
+  echo "Docker CLI is not installed. Install docker.io / docker-ce first." >&2
+  exit 1
+fi
+
+if ! python3 -c "import pytest" >/dev/null 2>&1; then
+  echo "pytest is missing for python3. Install test deps:" >&2
+  echo "  python3 -m pip install -r requirements.txt pytest" >&2
+  exit 1
+fi
+
+if ! python3 -c "import psycopg" >/dev/null 2>&1; then
+  echo "psycopg is missing for python3. Install:" >&2
+  echo "  python3 -m pip install 'psycopg[binary]'" >&2
   exit 1
 fi
 
@@ -19,6 +31,13 @@ elif command -v sudo >/dev/null 2>&1 && sudo docker info >/dev/null 2>&1; then
   DOCKER=(sudo -E docker)
 else
   echo "Docker daemon unavailable (cannot connect to docker socket)." >&2
+  echo "Start it with: sudo systemctl start docker" >&2
+  exit 1
+fi
+
+if ! "${DOCKER[@]}" compose version >/dev/null 2>&1; then
+  echo "Docker Compose plugin missing. Install docker-compose-plugin / docker-compose-v2." >&2
+  echo "Then run: docker compose version" >&2
   exit 1
 fi
 

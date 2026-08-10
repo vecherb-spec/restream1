@@ -356,8 +356,13 @@ pytest -q
 PostgreSQL integration tests (real Postgres via Compose overlay):
 
 ```bash
+cd /opt/restream   # or your clone path
+python3 -m pip install -r requirements.txt pytest
 ./deploy/scripts/run_postgres_tests.sh
 ```
+
+Do **not** run bare `docker` / bare `pytest` — use the script (it calls
+`docker compose ...` and `python3 -m pytest`).
 
 This starts `postgres` from `docker-compose.yml` + `docker-compose.test.yml`
 (`restream_test` on `127.0.0.1:5432`) and runs `tests/test_postgres_integration.py`.
