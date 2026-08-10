@@ -182,45 +182,8 @@ class DatabaseSqliteIntegrationTests(unittest.TestCase):
         self.assertEqual(fresh["stream_title"], "Night Show")
 
 
-@unittest.skipUnless(
-    os.getenv("RESTREAM_TEST_DATABASE_URL", "").startswith(("postgresql://", "postgres://")),
-    "Set RESTREAM_TEST_DATABASE_URL to run PostgreSQL integration tests",
-)
-class PostgresIntegrationTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        os.environ["DATABASE_URL"] = os.environ["RESTREAM_TEST_DATABASE_URL"]
-        for name in list(sys.modules):
-            if name in {"database", "main"} or name.startswith("database."):
-                del sys.modules[name]
-
-    def test_postgres_user_roundtrip(self) -> None:
-        from database import (
-            authenticate_user,
-            create_auth_session,
-            create_user,
-            get_user_by_session_token,
-            init_db,
-            update_restream_settings,
-            update_stream_title,
-        )
-
-        init_db()
-        ok, message, user = create_user("pg_user", "password123", "pg@example.com")
-        self.assertTrue(ok, message)
-        assert user is not None
-        update_restream_settings(
-            int(user["id"]),
-            {"vk_active": 1, "vk_url": "rtmp://vk.example/app", "vk_key": "k"},
-        )
-        update_stream_title(int(user["id"]), "PG Title")
-        auth = authenticate_user("pg_user", "password123")
-        assert auth is not None
-        self.assertEqual(auth["stream_title"], "PG Title")
-        token = create_auth_session(int(auth["id"]))
-        session_user = get_user_by_session_token(token)
-        assert session_user is not None
-        self.assertEqual(session_user["username"], "pg_user")
+# PostgreSQL integration tests live in tests/test_postgres_integration.py
+# and are launched with ./deploy/scripts/run_postgres_tests.sh
 
 
 if __name__ == "__main__":

@@ -345,11 +345,22 @@ location / {
 
 ## Tests
 
+Unit / API tests (SQLite):
+
 ```bash
 RESTREAM_ALLOW_INSECURE_DEFAULTS=true \
 RESTREAM_SRS_WEBHOOK_SECRET=unit-test-srs-secret-value \
-python3 -m unittest discover -s tests -v
+pytest -q
 ```
+
+PostgreSQL integration tests (real Postgres via Compose overlay):
+
+```bash
+./deploy/scripts/run_postgres_tests.sh
+```
+
+This starts `postgres` from `docker-compose.yml` + `docker-compose.test.yml`
+(`restream_test` on `127.0.0.1:5432`) and runs `tests/test_postgres_integration.py`.
 
 ## Troubleshooting
 
