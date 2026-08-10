@@ -410,6 +410,31 @@ class TelegramUsernameTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(username, "")
 
+    def test_resolve_falls_back_to_updates_after_start(self) -> None:
+        import telegram_notify
+
+        def fake_api(method: str, params: dict, **_kwargs: object):
+            if method == "getChat":
+                return False, {}, "Bad Request: chat not found"
+            if method == "getUpdates":
+                return True, [
+                    {
+                        "message": {
+                            "chat": {"id": 777001, "username": "ChurchLive", "type": "private"},
+                            "from": {"id": 777001, "username": "ChurchLive"},
+                            "text": "/start",
+                        }
+                    }
+                ], "ok"
+            if method == "getMe":
+                return True, {"username": "mlrestream_bot"}, "ok"
+            return False, {}, "unexpected"
+
+        with mock.patch.object(telegram_notify, "_telegram_api_call", side_effect=fake_api):
+            ok, chat_id, message = telegram_notify.resolve_telegram_chat_id("@ChurchLive")
+        self.assertTrue(ok, message)
+        self.assertEqual(chat_id, "777001")
+
     def test_save_username_without_numeric_chat_id(self) -> None:
         import database
 

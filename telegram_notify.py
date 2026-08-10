@@ -167,8 +167,11 @@ def _redact_token(text: str, token: str) -> str:
     return text
 
 
-def _telegram_api_call(method: str, params: dict[str, Any], *, timeout: float = 8.0) -> tuple[bool, dict[str, Any], str]:
-    """Call Telegram Bot API method. Never logs the bot token."""
+def _telegram_api_call(method: str, params: dict[str, Any], *, timeout: float = 8.0) -> tuple[bool, Any, str]:
+    """Call Telegram Bot API method. Never logs the bot token.
+
+    On success returns the raw `result` payload (dict/list/scalar).
+    """
 
     token = telegram_bot_token()
     if not token:
@@ -186,11 +189,19 @@ def _telegram_api_call(method: str, params: dict[str, Any], *, timeout: float = 
     except urllib.error.HTTPError as exc:
         detail = ""
         try:
-            detail = exc.read().decode("utf-8", errors="replace")[:200]
+            detail = exc.read().decode("utf-8", errors="replace")[:300]
         except Exception:
             detail = ""
         detail = _redact_token(detail, token)
         logger.warning("Telegram API %s HTTP error status=%s detail=%s", method, exc.code, detail or "-")
+        description = ""
+        try:
+            parsed = json.loads(detail) if detail else {}
+            description = str(parsed.get("description") or "")
+        except json.JSONDecodeError:
+            description = ""
+        if description:
+            return False, {}, _redact_token(description, token)
         return False, {}, f"Telegram API HTTP {exc.code}"
     except Exception as exc:
         logger.warning("Telegram API %s request failed: %s", method, type(exc).__name__)
@@ -200,12 +211,75 @@ def _telegram_api_call(method: str, params: dict[str, Any], *, timeout: float = 
         desc = _redact_token(str(payload.get("description") or "unknown")[:200], token)
         logger.warning("Telegram API %s rejected: %s", method, desc)
         return False, payload, desc or "Telegram API rejected request"
-    result = payload.get("result")
-    return True, (result if isinstance(result, dict) else {"result": result}), "ok"
+    return True, payload.get("result"), "ok"
+
+
+_bot_username_cache: dict[str, Any] = {"value": "", "expires_at": 0.0}
+
+
+def get_telegram_bot_username(*, timeout: float = 8.0, use_cache: bool = True) -> str:
+    """Return bot @username without @, or empty string."""
+
+    now = time.monotonic()
+    if use_cache and _bot_username_cache["expires_at"] > now:
+        return str(_bot_username_cache["value"] or "")
+    ok, result, _message = _telegram_api_call("getMe", {}, timeout=timeout)
+    username = ""
+    if ok and isinstance(result, dict):
+        username = str(result.get("username") or "").strip().lstrip("@")
+    _bot_username_cache["value"] = username
+    _bot_username_cache["expires_at"] = now + 300.0
+    return username
+
+
+def _start_bot_hint() -> str:
+    bot = get_telegram_bot_username()
+    if bot:
+        return (
+            f"Не удалось найти ваш чат. Откройте @{bot} в Telegram, "
+            "нажмите Start (или отправьте /start), затем повторите проверку."
+        )
+    return (
+        "Не удалось найти ваш чат. Откройте бота в Telegram, "
+        "нажмите Start (или отправьте /start), затем повторите проверку."
+    )
+
+
+def _find_chat_id_in_updates(username: str, *, timeout: float = 8.0) -> str | None:
+    """Find chat id for username from recent private bot updates (/start etc.)."""
+
+    wanted = username.strip().lstrip("@").lower()
+    if not wanted:
+        return None
+    ok, result, _message = _telegram_api_call(
+        "getUpdates",
+        {"limit": 100, "timeout": 0},
+        timeout=timeout,
+    )
+    if not ok or not isinstance(result, list):
+        return None
+    for update in reversed(result):
+        if not isinstance(update, dict):
+            continue
+        message = update.get("message") or update.get("edited_message") or {}
+        if not isinstance(message, dict):
+            continue
+        chat = message.get("chat") or {}
+        sender = message.get("from") or {}
+        candidates = [
+            str(chat.get("username") or "").lower(),
+            str(sender.get("username") or "").lower(),
+        ]
+        if wanted in candidates and chat.get("id") is not None:
+            return str(chat["id"])
+    return None
 
 
 def resolve_telegram_chat_id(username_or_chat: str, *, timeout: float = 8.0) -> tuple[bool, str, str]:
-    """Resolve @username (or numeric id) to a Telegram chat id via getChat."""
+    """Resolve @username (or numeric id) to a Telegram chat id.
+
+    Tries getChat first, then recent getUpdates (after the user presses Start).
+    """
 
     target = (username_or_chat or "").strip()
     if not target:
@@ -215,17 +289,25 @@ def resolve_telegram_chat_id(username_or_chat: str, *, timeout: float = 8.0) -> 
     ok_user, username, error = normalize_telegram_username(target)
     if not ok_user:
         return False, "", error
+
     ok, result, message = _telegram_api_call("getChat", {"chat_id": f"@{username}"}, timeout=timeout)
-    if not ok:
-        hint = (
-            "Не удалось найти чат по логину. Откройте бота в Telegram, нажмите Start "
-            "и повторите проверку."
-        )
-        return False, "", hint if "chat not found" in message.lower() or "not found" in message.lower() else message
-    chat_id = result.get("id")
-    if chat_id is None:
-        return False, "", "Telegram getChat did not return chat id"
-    return True, str(chat_id), "ok"
+    if ok and isinstance(result, dict) and result.get("id") is not None:
+        return True, str(result["id"]), "ok"
+
+    from_updates = _find_chat_id_in_updates(username, timeout=timeout)
+    if from_updates:
+        return True, from_updates, "ok"
+
+    lowered = (message or "").lower()
+    if (
+        "chat not found" in lowered
+        or "not found" in lowered
+        or "bad request" in lowered
+        or "http 400" in lowered
+        or not ok
+    ):
+        return False, "", _start_bot_hint()
+    return False, "", message
 
 
 def send_telegram_message(chat_id: str, text: str, *, timeout: float = 8.0) -> tuple[bool, str]:
@@ -333,7 +415,11 @@ def build_stream_stopped_message(username: str, when: str = "") -> str:
 def notification_public_status() -> dict[str, Any]:
     """Safe status fragment for API clients (no token)."""
 
-    return {"telegram_bot_configured": telegram_bot_configured()}
+    bot_username = get_telegram_bot_username() if telegram_bot_configured() else ""
+    return {
+        "telegram_bot_configured": telegram_bot_configured(),
+        "telegram_bot_username": f"@{bot_username}" if bot_username else "",
+    }
 
 
 def local_time_hhmmss() -> str:

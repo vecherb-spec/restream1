@@ -58,6 +58,7 @@ export type NotificationSettings = {
   telegram_chat_id_set: boolean;
   telegram_target_set?: boolean;
   telegram_bot_configured: boolean;
+  telegram_bot_username?: string;
 };
 
 export type StreamStatus = {

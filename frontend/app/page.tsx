@@ -1345,8 +1345,15 @@ function ClientProfile({
           />
         </label>
         <p className="muted">
-          Укажите логин Telegram (@username). Сначала откройте бота и нажмите Start — иначе сообщения не дойдут.
-          Bot token задаётся только на сервере ({notifySettings?.telegram_bot_configured ? "настроен" : "не настроен"}).
+          Укажите логин Telegram (@username). Сначала откройте{" "}
+          {notifySettings?.telegram_bot_username ? (
+            <strong>{notifySettings.telegram_bot_username}</strong>
+          ) : (
+            "бота"
+          )}{" "}
+          и нажмите Start / отправьте /start — иначе сообщения не дойдут.
+          Token бота задаётся только на сервере (
+          {notifySettings?.telegram_bot_configured ? "настроен" : "не настроен"}).
         </p>
         {notifyError && <div className="error">{notifyError}</div>}
         {notifyMessage && <div className="alert">{notifyMessage}</div>}
