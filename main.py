@@ -66,7 +66,7 @@ from database import (
     create_user,
     delete_auth_session,
     get_active_user_by_stream_key,
-    get_enabled_destinations,
+    get_enabled_destination_specs,
     get_user_by_id,
     get_user_by_session_token,
     init_db,
@@ -498,12 +498,48 @@ def safe_log_name(stream_key: str) -> str:
     return safe_key or "stream"
 
 
+def worker_key_for(stream_key: str, platform_id: str) -> str:
+    """Return the in-memory key for one destination worker."""
+
+    return f"{stream_key}::{platform_id}"
+
+
+def split_worker_key(worker_key: str) -> tuple[str, str]:
+    """Split a worker key into stream key and platform id."""
+
+    stream_key, separator, platform_id = worker_key.partition("::")
+    return stream_key, platform_id if separator else ""
+
+
+def worker_key_matches_stream(worker_key: str, stream_key: str) -> bool:
+    """Return whether a worker key belongs to a stream key."""
+
+    return worker_key == stream_key or worker_key.startswith(f"{stream_key}::")
+
+
+def platform_title(platform_id: str) -> str:
+    """Return a display title for a platform id."""
+
+    for config in PLATFORM_STATUS_CONFIGS:
+        if config["id"] == platform_id:
+            return str(config["title"])
+    return platform_id or "Unknown"
+
+
 def log_path_for_stream(stream_key: str) -> Path:
     """Return the FFmpeg log path for a stream."""
 
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     return LOG_DIR / f"ffmpeg_{safe_log_name(stream_key)}_{timestamp}.log"
+
+
+def log_path_for_worker(stream_key: str, platform_id: str) -> Path:
+    """Return the FFmpeg log path for one destination worker."""
+
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    return LOG_DIR / f"ffmpeg_{safe_log_name(stream_key)}_{safe_log_name(platform_id)}_{timestamp}.log"
 
 
 def progress_path_for_log(log_path: Path) -> Path:
@@ -622,8 +658,8 @@ def parse_ffmpeg_progress(progress_path: str | Path | None) -> dict[str, Any]:
     return metrics
 
 
-def process_snapshot(stream_key: str, entry: dict[str, Any]) -> dict[str, Any]:
-    """Serialize a process entry for the admin API."""
+def process_snapshot(worker_key: str, entry: dict[str, Any]) -> dict[str, Any]:
+    """Serialize one destination worker entry for APIs."""
 
     process: Any = entry["process"]
     return_code = process.poll()
@@ -631,8 +667,13 @@ def process_snapshot(stream_key: str, entry: dict[str, Any]) -> dict[str, Any]:
         progress_path_for_log(Path(entry["log_path"])) if entry.get("log_path") else None
     )
     progress = parse_ffmpeg_progress(progress_path)
+    stream_key = str(entry.get("stream_key") or split_worker_key(worker_key)[0])
+    platform_id = str(entry.get("platform_id") or split_worker_key(worker_key)[1])
     return {
+        "worker_key": worker_key,
         "stream_key": stream_key,
+        "platform_id": platform_id,
+        "platform_title": entry.get("platform_title") or platform_title(platform_id),
         "pid": process.pid,
         "status": "running" if return_code is None else "exited",
         "return_code": return_code,
@@ -647,6 +688,37 @@ def process_snapshot(stream_key: str, entry: dict[str, Any]) -> dict[str, Any]:
         "dropped_frames": progress["dropped_frames"],
         "resolution": entry.get("resolution") or "",
         "progress": progress["progress"],
+    }
+
+
+def aggregate_process_snapshot(stream_key: str, workers: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Build a stream-level compatibility snapshot from per-destination workers."""
+
+    if not workers:
+        return None
+
+    running = [worker for worker in workers if worker.get("status") == "running"]
+    sample = running[0] if running else workers[0]
+    frame_values = [int(worker.get("frame") or 0) for worker in workers]
+    return {
+        "stream_key": stream_key,
+        "pid": sample.get("pid"),
+        "status": "running" if running else "exited",
+        "return_code": None if running else sample.get("return_code"),
+        "started_at": sample.get("started_at"),
+        "destinations": len(workers),
+        "workers_running": len(running),
+        "workers_total": len(workers),
+        "log_path": sample.get("log_path") or "",
+        "progress_path": sample.get("progress_path") or "",
+        "frame": max(frame_values) if frame_values else 0,
+        "fps": sample.get("fps"),
+        "bitrate": sample.get("bitrate") or "",
+        "speed": sample.get("speed") or "",
+        "dropped_frames": sample.get("dropped_frames"),
+        "resolution": sample.get("resolution") or "",
+        "progress": sample.get("progress") or "",
+        "workers": workers,
     }
 
 
@@ -685,7 +757,7 @@ PLATFORM_STATUS_CONFIGS = [
     },
     {
         "id": "custom",
-        "title": "Custom RTMP",
+        "title": "Custom",
         "active_field": "custom_active",
         "key_field": "custom_key",
         "url_field": "custom_url",
@@ -708,20 +780,22 @@ def platform_configured(user: dict[str, Any], config: dict[str, Any]) -> bool:
 def build_platform_statuses(
     user: dict[str, Any] | None,
     publisher: dict[str, Any] | None,
-    process: dict[str, Any] | None,
-    recent: dict[str, Any] | None,
+    workers_by_platform: dict[str, dict[str, Any]],
+    recent_by_platform: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Build client-facing per-platform status labels."""
 
     if user is None:
         return []
 
-    process_running = bool(process and process.get("status") == "running")
-    process_exited = bool(process and process.get("status") == "exited")
-    recent_failed = bool(recent and recent.get("return_code") not in {None, 0})
-
     statuses: list[dict[str, Any]] = []
     for config in PLATFORM_STATUS_CONFIGS:
+        platform_id = str(config["id"])
+        worker = workers_by_platform.get(platform_id)
+        recent = recent_by_platform.get(platform_id)
+        worker_running = bool(worker and worker.get("status") == "running")
+        worker_exited = bool(worker and worker.get("status") == "exited")
+        recent_failed = bool(recent and recent.get("return_code") not in {None, 0})
         active = bool(user.get(config["active_field"]))
         configured = platform_configured(user, config)
 
@@ -740,12 +814,12 @@ def build_platform_statuses(
             label = "Ждет VideoCoder"
             color = "yellow"
             reason = "Входящий поток пока не опубликован в SRS."
-        elif process_running:
+        elif worker_running:
             state = "live"
             label = "В эфире"
             color = "green"
             reason = ""
-        elif process_exited or recent_failed:
+        elif worker_exited or recent_failed:
             state = "error"
             label = "Ошибка"
             color = "red"
@@ -811,8 +885,12 @@ def probe_stream_resolution(stream_key: str, input_url: str) -> None:
 
     resolution = f"{width}x{height}"
     with process_lock:
-        entry = active_processes.get(stream_key)
-        if entry:
+        entries = [
+            entry
+            for worker_key, entry in active_processes.items()
+            if worker_key_matches_stream(worker_key, stream_key)
+        ]
+        for entry in entries:
             entry["resolution"] = resolution
     logger.info("Detected resolution for %s: %s", stream_key, resolution)
 
@@ -823,15 +901,29 @@ def stream_status_payload(stream_key: str) -> dict[str, Any]:
     user = get_active_user_by_stream_key(stream_key)
     with process_lock:
         publisher = active_publishers.get(stream_key)
-        process_entry = active_processes.get(stream_key)
-        recent_entry = next(
-            (item for item in recent_processes if item.get("stream_key") == stream_key),
-            None,
-        )
+        worker_entries = [
+            (worker_key, entry)
+            for worker_key, entry in active_processes.items()
+            if worker_key_matches_stream(worker_key, stream_key)
+        ]
+        recent_entries = [
+            item for item in recent_processes if item.get("stream_key") == stream_key
+        ]
 
-    process = process_snapshot(stream_key, process_entry) if process_entry else None
-    recent = recent_entry if recent_entry else None
-    platform_statuses = build_platform_statuses(user, publisher, process, recent)
+    workers = [process_snapshot(worker_key, entry) for worker_key, entry in worker_entries]
+    process = aggregate_process_snapshot(stream_key, workers)
+    recent = recent_entries[0] if recent_entries else None
+    workers_by_platform = {
+        str(worker.get("platform_id") or ""): worker
+        for worker in workers
+        if worker.get("platform_id")
+    }
+    recent_by_platform: dict[str, dict[str, Any]] = {}
+    for item in recent_entries:
+        platform_id = str(item.get("platform_id") or "")
+        if platform_id and platform_id not in recent_by_platform:
+            recent_by_platform[platform_id] = item
+    platform_statuses = build_platform_statuses(user, publisher, workers_by_platform, recent_by_platform)
     destinations = 0
     if publisher:
         destinations = int(publisher.get("destinations") or 0)
@@ -843,6 +935,7 @@ def stream_status_payload(stream_key: str) -> dict[str, Any]:
     bitrate = process.get("bitrate") if process and process.get("bitrate") else ""
     resolution = process.get("resolution") if process and process.get("resolution") else ""
     dropped_frames = process.get("dropped_frames") if process and process.get("dropped_frames") is not None else None
+    running_workers = int(process.get("workers_running") or 0) if process else 0
 
     if not publisher:
         color = "red"
@@ -852,10 +945,14 @@ def stream_status_payload(stream_key: str) -> dict[str, Any]:
         color = "yellow"
         label = "Есть поток - рестрим не запущен"
         message = ""
-    elif process and process.get("status") == "running":
+    elif process and process.get("status") == "running" and running_workers >= destinations:
         color = "green" if frame > 0 else "yellow"
         label = "Рестрим работает" if frame > 0 else "FFmpeg запущен, ждем кадры"
         message = "FFmpeg отправляет поток на активные площадки."
+    elif process and process.get("status") == "running":
+        color = "yellow"
+        label = "Часть рестримов работает"
+        message = "Один или несколько FFmpeg-воркеров не активны. Проверьте статусы площадок."
     else:
         color = "yellow"
         label = "Поток есть, FFmpeg не работает"
@@ -869,6 +966,7 @@ def stream_status_payload(stream_key: str) -> dict[str, Any]:
         "message": message,
         "publisher": publisher,
         "process": process,
+        "workers": workers,
         "recent": recent,
         "frame": frame,
         "fps": fps,
@@ -894,10 +992,27 @@ def active_streams() -> dict[str, Any]:
     """Serialize active publishers, FFmpeg workers, and recent exits for admin APIs."""
 
     with process_lock:
-        streams = [process_snapshot(key, entry) for key, entry in active_processes.items()]
+        worker_snapshots = [
+            process_snapshot(worker_key, entry)
+            for worker_key, entry in active_processes.items()
+        ]
         publishers = [{"stream_key": key, **value} for key, value in active_publishers.items()]
         recent = recent_processes[:20]
-    return {"code": 0, "streams": streams, "publishers": publishers, "recent": recent}
+    by_stream: dict[str, list[dict[str, Any]]] = {}
+    for worker in worker_snapshots:
+        by_stream.setdefault(str(worker.get("stream_key") or ""), []).append(worker)
+    streams = [
+        aggregate
+        for stream_key, workers in by_stream.items()
+        if (aggregate := aggregate_process_snapshot(stream_key, workers)) is not None
+    ]
+    return {
+        "code": 0,
+        "streams": streams,
+        "workers": worker_snapshots,
+        "publishers": publishers,
+        "recent": recent,
+    }
 
 
 def stream_logs(stream_key: str, lines: int = 80) -> dict[str, Any]:
@@ -905,8 +1020,23 @@ def stream_logs(stream_key: str, lines: int = 80) -> dict[str, Any]:
 
     with process_lock:
         entry = active_processes.get(stream_key)
+        if entry is None:
+            matching_entries = [
+                candidate
+                for worker_key, candidate in active_processes.items()
+                if worker_key_matches_stream(worker_key, stream_key)
+            ]
+            entry = max(
+                matching_entries,
+                key=lambda candidate: str(candidate.get("started_at") or ""),
+                default=None,
+            )
         recent_entry = next(
-            (item for item in recent_processes if item.get("stream_key") == stream_key),
+            (
+                item
+                for item in recent_processes
+                if item.get("stream_key") == stream_key or item.get("worker_key") == stream_key
+            ),
             None,
         )
 
@@ -920,9 +1050,20 @@ def stream_logs(stream_key: str, lines: int = 80) -> dict[str, Any]:
         return {"code": 1, "message": "stream log was not found", "lines": []}
 
     lines_payload = tail_log_file(log_path, lines=lines)
+    response_stream_key = (
+        str(entry.get("stream_key") or "")
+        if entry
+        else str(recent_entry.get("stream_key") or "") if recent_entry else stream_key
+    )
+    response_worker_key = (
+        str(entry.get("worker_key") or "")
+        if entry
+        else str(recent_entry.get("worker_key") or "") if recent_entry else ""
+    )
     return {
         "code": 0,
-        "stream_key": stream_key,
+        "stream_key": response_stream_key,
+        "worker_key": response_worker_key,
         "log_path": str(log_path or ""),
         "lines": lines_payload,
         "message": "" if lines_payload else "stream log is empty",
@@ -938,6 +1079,7 @@ def admin_live_dashboard_payload() -> dict[str, Any]:
         "database_backend": DATABASE_BACKEND,
         "metrics": system_metrics_payload(),
         "streams": streams_payload["streams"],
+        "workers": streams_payload["workers"],
         "publishers": streams_payload["publishers"],
         "recent": streams_payload["recent"],
     }
@@ -1171,6 +1313,22 @@ def read_process_cmdline(pid: int) -> list[str] | None:
     return [part.decode("utf-8", "replace") for part in raw.split(b"\0") if part]
 
 
+def read_process_environ(pid: int) -> dict[str, str] | None:
+    """Read NUL-separated environ for a Linux process."""
+
+    try:
+        raw = Path(f"/proc/{pid}/environ").read_bytes()
+    except OSError:
+        return None
+    environ: dict[str, str] = {}
+    for part in raw.split(b"\0"):
+        if not part or b"=" not in part:
+            continue
+        key, value = part.split(b"=", 1)
+        environ[key.decode("utf-8", "replace")] = value.decode("utf-8", "replace")
+    return environ
+
+
 def discover_orphan_ffmpeg_workers() -> list[dict[str, Any]]:
     """Find FFmpeg restream workers started by a previous backend process."""
 
@@ -1185,19 +1343,25 @@ def discover_orphan_ffmpeg_workers() -> list[dict[str, Any]]:
         if not entry.name.isdigit():
             continue
         pid = int(entry.name)
+        environ = read_process_environ(pid)
+        if not environ or environ.get("RESTREAM_WORKER") != "1":
+            continue
+        stream_key = str(environ.get("RESTREAM_STREAM_KEY") or "").strip()
+        platform_id = str(environ.get("RESTREAM_PLATFORM") or "").strip()
+        if not stream_key or not platform_id:
+            continue
         args = read_process_cmdline(pid)
         if not args:
             continue
         binary_name = Path(args[0]).name
         if binary_name != ffmpeg_name and binary_name != "ffmpeg":
             continue
-        stream_key = extract_stream_key_from_ffmpeg_args(args)
-        if not stream_key:
-            continue
         workers.append(
             {
                 "pid": pid,
                 "stream_key": stream_key,
+                "platform_id": platform_id,
+                "worker_key": worker_key_for(stream_key, platform_id),
                 "args": args,
                 "progress_path": extract_progress_path_from_ffmpeg_args(args),
                 "destinations": count_flv_outputs_in_ffmpeg_args(args),
@@ -1207,23 +1371,24 @@ def discover_orphan_ffmpeg_workers() -> list[dict[str, Any]]:
 
 
 def attach_monitor_threads(
-    stream_key: str,
+    worker_key: str,
     process: Any,
     progress_path: Path,
     input_url: str | None = None,
 ) -> None:
     """Start monitor/stall(/optional probe) threads for a managed FFmpeg process."""
 
+    stream_key, _platform_id = split_worker_key(worker_key)
     threading.Thread(
         target=monitor_process,
-        args=(stream_key, process),
-        name=f"ffmpeg-monitor-{stream_key}",
+        args=(worker_key, process),
+        name=f"ffmpeg-monitor-{worker_key}",
         daemon=True,
     ).start()
     threading.Thread(
         target=watch_ffmpeg_stall,
-        args=(stream_key, process, progress_path),
-        name=f"ffmpeg-stall-{stream_key}",
+        args=(worker_key, process, progress_path),
+        name=f"ffmpeg-stall-{worker_key}",
         daemon=True,
     ).start()
     if input_url:
@@ -1239,6 +1404,8 @@ def adopt_ffmpeg_worker(worker: dict[str, Any]) -> bool:
     """Attach monitors to an already-running FFmpeg worker and restore publisher state."""
 
     stream_key = str(worker["stream_key"])
+    platform_id = str(worker["platform_id"])
+    worker_key = str(worker.get("worker_key") or worker_key_for(stream_key, platform_id))
     pid = int(worker["pid"])
     process = ExternalProcess(pid)
     if process.poll() is not None:
@@ -1250,24 +1417,40 @@ def adopt_ffmpeg_worker(worker: dict[str, Any]) -> bool:
     published_at = utc_now_iso()
 
     with process_lock:
-        active_processes[stream_key] = {
+        active_processes[worker_key] = {
+            "worker_key": worker_key,
+            "stream_key": stream_key,
+            "platform_id": platform_id,
+            "platform_title": platform_title(platform_id),
             "process": process,
             "started_at": published_at,
-            "destinations": destinations,
+            "destinations": destinations or 1,
             "log_path": log_path,
             "progress_path": progress_path,
             "resolution": "",
             "adopted": True,
         }
-        active_publishers[stream_key] = {
-            "published_at": published_at,
-            "destinations": destinations,
-            "ffmpeg_started": True,
-            "adopted": True,
-        }
+        publisher = active_publishers.setdefault(
+            stream_key,
+            {
+                "published_at": published_at,
+                "destinations": 0,
+                "ffmpeg_started": True,
+                "adopted": True,
+            },
+        )
+        publisher["destinations"] = max(int(publisher.get("destinations") or 0), len([
+            key for key in active_processes if worker_key_matches_stream(key, stream_key)
+        ]))
+        publisher["ffmpeg_started"] = True
 
-    attach_monitor_threads(stream_key, process, Path(progress_path))
-    logger.warning("Adopted orphan FFmpeg pid=%s stream=%s", pid, stream_key)
+    attach_monitor_threads(worker_key, process, Path(progress_path))
+    logger.warning(
+        "Adopted orphan FFmpeg pid=%s stream=%s platform=%s",
+        pid,
+        stream_key,
+        platform_id,
+    )
     return True
 
 
@@ -1305,31 +1488,33 @@ def recover_ffmpeg_workers_on_startup() -> dict[str, int]:
 
     for worker in sorted(orphans, key=lambda item: int(item["pid"])):
         stream_key = str(worker["stream_key"])
+        worker_key = str(worker.get("worker_key") or worker_key_for(stream_key, str(worker.get("platform_id") or "")))
         pid = int(worker["pid"])
         user = get_active_user_by_stream_key(stream_key)
-        duplicate = stream_key in seen_keys
+        duplicate = worker_key in seen_keys
         if not adopt or user is None or duplicate:
             kill_process_pid(pid)
             stats["killed"] += 1
             logger.warning(
-                "Killed orphan FFmpeg pid=%s stream=%s (reason=%s)",
+                "Killed orphan FFmpeg pid=%s worker=%s (reason=%s)",
                 pid,
-                stream_key,
+                worker_key,
                 "duplicate" if duplicate else ("policy_kill" if user else "unknown_user"),
             )
             continue
         if adopt_ffmpeg_worker(worker):
-            seen_keys.add(stream_key)
+            seen_keys.add(worker_key)
             stats["adopted"] += 1
         else:
             stats["killed"] += 1
 
     persisted = load_publishers_state()
     for stream_key, meta in persisted.items():
-        if stream_key in seen_keys:
-            continue
         with process_lock:
-            already_active = stream_key in active_processes
+            already_active = any(
+                worker_key_matches_stream(worker_key, stream_key)
+                for worker_key in active_processes
+            )
         if already_active:
             continue
         user = get_active_user_by_stream_key(stream_key)
@@ -1337,7 +1522,7 @@ def recover_ffmpeg_workers_on_startup() -> dict[str, int]:
             forget_publisher(stream_key)
             continue
         allowed, _message = validate_destination_limit(user)
-        destinations = get_enabled_destinations(user)
+        destinations = get_enabled_destination_specs(user)
         if not allowed or not destinations:
             forget_publisher(stream_key)
             continue
@@ -1357,8 +1542,8 @@ def recover_ffmpeg_workers_on_startup() -> dict[str, int]:
             }
         try:
             if start_ffmpeg(stream_key, destinations):
-                stats["restarted"] += 1
-                seen_keys.add(stream_key)
+                stats["restarted"] += len(destinations)
+                seen_keys.update(worker_key_for(stream_key, spec["id"]) for spec in destinations)
                 logger.warning("Restarted FFmpeg for persisted publisher %s", stream_key)
             else:
                 forget_publisher(stream_key)
@@ -1372,14 +1557,14 @@ def recover_ffmpeg_workers_on_startup() -> dict[str, int]:
 
 def build_ffmpeg_command(
     stream_key: str,
-    destinations: list[str],
+    destination_url: str,
     progress_path: Path,
 ) -> list[str]:
-    """Build one FFmpeg command that fans out the input to all enabled outputs."""
+    """Build one FFmpeg command for a single destination output."""
 
     input_url = SRS_INPUT_URL_TEMPLATE.format(stream_key=stream_key)
     timeout_us = str(FFMPEG_RW_TIMEOUT_US)
-    command = [
+    return [
         FFMPEG_BIN,
         "-hide_banner",
         "-nostats",
@@ -1393,20 +1578,39 @@ def build_ffmpeg_command(
         input_url,
         "-c",
         "copy",
+        # Per-output network timeout so a hung RTMP target can fail this worker.
+        "-f",
+        "flv",
+        "-rw_timeout",
+        timeout_us,
+        destination_url,
     ]
-    for destination in destinations:
-        # Per-output network timeout so a hung RTMP target can fail the muxer.
-        command.extend(["-f", "flv", "-rw_timeout", timeout_us, destination])
-    return command
 
 
-def bump_ffmpeg_generation(stream_key: str) -> int:
-    """Invalidate in-flight FFmpeg starts for a stream key and return the new generation."""
+def bump_ffmpeg_generation(worker_key: str) -> int:
+    """Invalidate in-flight FFmpeg starts for a worker key and return the new generation."""
 
     with process_lock:
-        next_generation = ffmpeg_worker_generations.get(stream_key, 0) + 1
-        ffmpeg_worker_generations[stream_key] = next_generation
+        next_generation = ffmpeg_worker_generations.get(worker_key, 0) + 1
+        ffmpeg_worker_generations[worker_key] = next_generation
         return next_generation
+
+
+def bump_stream_generations(stream_key: str) -> None:
+    """Invalidate in-flight starts for all known workers belonging to a stream."""
+
+    with process_lock:
+        worker_keys = {
+            worker_key
+            for worker_key in active_processes
+            if worker_key_matches_stream(worker_key, stream_key)
+        }
+        worker_keys.update(
+            worker_key_for(stream_key, str(config["id"]))
+            for config in PLATFORM_STATUS_CONFIGS
+        )
+        for worker_key in worker_keys:
+            ffmpeg_worker_generations[worker_key] = ffmpeg_worker_generations.get(worker_key, 0) + 1
 
 
 def srs_input_seems_live(stream_key: str) -> bool:
@@ -1437,70 +1641,104 @@ def srs_input_seems_live(stream_key: str) -> bool:
     return result.returncode == 0 and bool((result.stdout or "").strip())
 
 
-def stop_process(stream_key: str, *, clear_restart_state: bool = False) -> bool:
-    """Terminate a running FFmpeg worker for a stream key."""
+def stop_worker(
+    worker_key: str,
+    *,
+    clear_restart_state: bool = False,
+    stopped_by: str = "admin_or_webhook",
+) -> bool:
+    """Terminate one running FFmpeg worker."""
 
-    bump_ffmpeg_generation(stream_key)
+    bump_ffmpeg_generation(worker_key)
     with process_lock:
-        entry = active_processes.pop(stream_key, None)
+        entry = active_processes.pop(worker_key, None)
 
     if entry is None:
         return False
 
+    stream_key = str(entry.get("stream_key") or split_worker_key(worker_key)[0])
     process: Any = entry["process"]
-    if process.poll() is not None:
-        logger.info("FFmpeg for %s already exited with code %s", stream_key, process.returncode)
-        if clear_restart_state:
-            clear_ffmpeg_restart_state(stream_key)
-        return True
-
-    logger.info("Stopping FFmpeg for stream %s", stream_key)
-    process.terminate()
-    try:
-        process.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        logger.warning("FFmpeg for %s did not stop gracefully; killing it", stream_key)
-        process.kill()
+    return_code = process.poll()
+    if return_code is not None:
+        logger.info("FFmpeg worker %s already exited with code %s", worker_key, return_code)
+    else:
+        logger.info("Stopping FFmpeg worker %s", worker_key)
+        process.terminate()
         try:
-            process.wait(timeout=5)
+            process.wait(timeout=10)
         except subprocess.TimeoutExpired:
-            logger.warning("FFmpeg for %s did not exit after kill", stream_key)
+            logger.warning("FFmpeg worker %s did not stop gracefully; killing it", worker_key)
+            process.kill()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                logger.warning("FFmpeg worker %s did not exit after kill", worker_key)
 
-    snapshot = process_snapshot(stream_key, entry)
+    snapshot = process_snapshot(worker_key, entry)
     snapshot["ended_at"] = utc_now_iso()
-    snapshot["stopped_by"] = "admin_or_webhook"
+    snapshot["stopped_by"] = stopped_by
     with process_lock:
         recent_processes.insert(0, snapshot)
         del recent_processes[50:]
     if clear_restart_state:
-        clear_ffmpeg_restart_state(stream_key)
+        ffmpeg_restart_counts.pop(worker_key, None)
     return True
+
+
+def stop_process(stream_key: str, *, clear_restart_state: bool = False) -> bool:
+    """Terminate all running FFmpeg workers for a stream key."""
+
+    bump_stream_generations(stream_key)
+    with process_lock:
+        worker_keys = [
+            worker_key
+            for worker_key in active_processes
+            if worker_key_matches_stream(worker_key, stream_key)
+        ]
+    stopped = False
+    for worker_key in worker_keys:
+        stopped = stop_worker(
+            worker_key,
+            clear_restart_state=clear_restart_state,
+            stopped_by="admin_or_webhook",
+        ) or stopped
+    if clear_restart_state:
+        clear_ffmpeg_restart_state(stream_key)
+    return stopped
 
 
 def clear_ffmpeg_restart_state(stream_key: str) -> None:
     """Reset FFmpeg auto-restart counters when a publish session ends."""
 
-    ffmpeg_restart_counts.pop(stream_key, None)
+    with process_lock:
+        keys = [
+            worker_key
+            for worker_key in ffmpeg_restart_counts
+            if worker_key_matches_stream(worker_key, stream_key)
+        ]
+        for worker_key in keys:
+            ffmpeg_restart_counts.pop(worker_key, None)
 
 
-def maybe_restart_ffmpeg(stream_key: str, return_code: int) -> None:
-    """Restart FFmpeg while SRS still reports an active publisher."""
+def maybe_restart_ffmpeg(worker_key: str, return_code: int) -> None:
+    """Restart one FFmpeg worker while SRS still reports an active publisher."""
 
     if return_code == 0 or FFMPEG_MAX_RESTARTS <= 0:
         return
 
+    stream_key, platform_id = split_worker_key(worker_key)
     with process_lock:
         still_published = stream_key in active_publishers
-        restart_count = ffmpeg_restart_counts.get(stream_key, 0)
-        generation_before_sleep = ffmpeg_worker_generations.get(stream_key, 0)
+        restart_count = ffmpeg_restart_counts.get(worker_key, 0)
+        generation_before_sleep = ffmpeg_worker_generations.get(worker_key, 0)
 
     if not still_published:
         return
 
     if restart_count >= FFMPEG_MAX_RESTARTS:
         logger.error(
-            "FFmpeg for %s crashed %s times; auto-restart limit reached",
-            stream_key,
+            "FFmpeg worker %s crashed %s times; auto-restart limit reached",
+            worker_key,
             restart_count,
         )
         return
@@ -1518,59 +1756,64 @@ def maybe_restart_ffmpeg(stream_key: str, return_code: int) -> None:
         )
         return
 
-    destinations = get_enabled_destinations(user)
-    if not destinations:
+    destinations = get_enabled_destination_specs(user)
+    destination = next((spec for spec in destinations if spec["id"] == platform_id), None)
+    if destination is None:
         return
 
-    ffmpeg_restart_counts[stream_key] = restart_count + 1
+    ffmpeg_restart_counts[worker_key] = restart_count + 1
     if FFMPEG_RESTART_DELAY_SECONDS:
         time.sleep(FFMPEG_RESTART_DELAY_SECONDS)
 
     with process_lock:
         if stream_key not in active_publishers:
             return
-        if ffmpeg_worker_generations.get(stream_key, 0) != generation_before_sleep:
+        if ffmpeg_worker_generations.get(worker_key, 0) != generation_before_sleep:
             return
-        current = active_processes.get(stream_key)
+        current = active_processes.get(worker_key)
         if current and current.get("process") is not None and current["process"].poll() is None:
             # A newer healthy worker already replaced the crashed one.
             return
 
     logger.warning(
-        "Restarting FFmpeg for %s after exit code %s (attempt %s/%s)",
-        stream_key,
+        "Restarting FFmpeg worker %s after exit code %s (attempt %s/%s)",
+        worker_key,
         return_code,
         restart_count + 1,
         FFMPEG_MAX_RESTARTS,
     )
     try:
-        start_ffmpeg(stream_key, destinations)
+        start_ffmpeg_worker(stream_key, destination)
     except Exception:
-        logger.exception("Failed to auto-restart FFmpeg for %s", stream_key)
+        logger.exception("Failed to auto-restart FFmpeg worker %s", worker_key)
 
 
-def monitor_process(stream_key: str, process: Any) -> None:
+def monitor_process(worker_key: str, process: Any) -> None:
     """Remove a worker from active_processes when FFmpeg exits by itself."""
 
     return_code = process.wait()
+    unexpected_exit = False
     with process_lock:
-        current_entry = active_processes.get(stream_key)
+        current_entry = active_processes.get(worker_key)
         if current_entry and current_entry.get("process") is process:
-            snapshot = process_snapshot(stream_key, current_entry)
+            unexpected_exit = True
+            snapshot = process_snapshot(worker_key, current_entry)
             snapshot["ended_at"] = utc_now_iso()
             recent_processes.insert(0, snapshot)
             del recent_processes[50:]
-            active_processes.pop(stream_key, None)
+            active_processes.pop(worker_key, None)
 
     if return_code == 0:
-        logger.info("FFmpeg for %s finished successfully", stream_key)
+        logger.info("FFmpeg worker %s finished successfully", worker_key)
+    elif unexpected_exit:
+        logger.error("FFmpeg worker %s exited with code %s", worker_key, return_code)
+        maybe_restart_ffmpeg(worker_key, return_code)
     else:
-        logger.error("FFmpeg for %s exited with code %s", stream_key, return_code)
-        maybe_restart_ffmpeg(stream_key, return_code)
+        logger.info("FFmpeg worker %s exited with code %s after being stopped", worker_key, return_code)
 
 
 def watch_ffmpeg_stall(
-    stream_key: str,
+    worker_key: str,
     process: Any,
     progress_path: Path,
 ) -> None:
@@ -1584,10 +1827,11 @@ def watch_ffmpeg_stall(
 
     last_marker = ""
     last_change = time.monotonic()
+    stream_key, _platform_id = split_worker_key(worker_key)
 
     while process.poll() is None:
         with process_lock:
-            current = active_processes.get(stream_key)
+            current = active_processes.get(worker_key)
             still_ours = bool(current and current.get("process") is process)
             still_published = stream_key in active_publishers
         if not still_ours or not still_published:
@@ -1609,66 +1853,108 @@ def watch_ffmpeg_stall(
             last_change = now
         elif now - last_change >= FFMPEG_STALL_TIMEOUT_SECONDS:
             logger.error(
-                "FFmpeg for %s stalled for %ss (no progress); killing hung process",
-                stream_key,
+                "FFmpeg worker %s stalled for %ss (no progress); killing hung process",
+                worker_key,
                 int(FFMPEG_STALL_TIMEOUT_SECONDS),
             )
             try:
                 process.kill()
             except OSError:
-                logger.exception("Failed to kill stalled FFmpeg for %s", stream_key)
+                logger.exception("Failed to kill stalled FFmpeg worker %s", worker_key)
             return
 
         time.sleep(5)
 
 
-def start_ffmpeg(stream_key: str, destinations: list[str]) -> bool:
-    """Start or replace a FFmpeg worker for the stream key."""
+def normalize_destination_specs(destinations: list[Any]) -> list[dict[str, str]]:
+    """Normalize destination specs while tolerating legacy URL lists."""
 
-    if not destinations:
-        logger.info("Stream %s accepted without restream destinations", stream_key)
-        return False
+    specs: list[dict[str, str]] = []
+    for index, destination in enumerate(destinations):
+        if isinstance(destination, dict):
+            platform_id = str(destination.get("id") or "").strip()
+            title = str(destination.get("title") or platform_id or f"Destination {index + 1}").strip()
+            url = str(destination.get("url") or "").strip()
+        else:
+            platform_id = f"custom{index + 1}"
+            title = f"Destination {index + 1}"
+            url = str(destination or "").strip()
+        if not platform_id or not url:
+            continue
+        specs.append({"id": platform_id, "title": title, "url": url})
+    return specs
 
-    # SRS may retry callbacks; ensure only one worker exists per stream key.
-    stop_process(stream_key)
-    generation = bump_ffmpeg_generation(stream_key)
 
-    input_url = SRS_INPUT_URL_TEMPLATE.format(stream_key=stream_key)
-    log_path = log_path_for_stream(stream_key)
-    progress_path = progress_path_for_log(log_path)
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    progress_path.write_text("", encoding="utf-8")
+def redacted_ffmpeg_command(command: list[str]) -> list[str]:
+    """Redact destination RTMP URLs before logging command lines."""
 
-    command = build_ffmpeg_command(stream_key, destinations, progress_path)
     redacted_command = command[:]
     for index, value in enumerate(redacted_command):
         if value.startswith(("rtmp://", "rtmps://")) and index > 0:
             redacted_command[index] = "[RTMP_OUTPUT_REDACTED]"
-    logger.info("Starting FFmpeg for %s: %s", stream_key, " ".join(redacted_command))
+    return redacted_command
+
+
+def start_ffmpeg_worker(stream_key: str, destination: dict[str, str]) -> bool:
+    """Start or replace one destination FFmpeg worker."""
+
+    platform_id = str(destination["id"])
+    destination_url = str(destination["url"])
+    worker_key = worker_key_for(stream_key, platform_id)
+    stop_worker(worker_key)
+    generation = bump_ffmpeg_generation(worker_key)
+
+    input_url = SRS_INPUT_URL_TEMPLATE.format(stream_key=stream_key)
+    log_path = log_path_for_worker(stream_key, platform_id)
+    progress_path = progress_path_for_log(log_path)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    progress_path.write_text("", encoding="utf-8")
+
+    command = build_ffmpeg_command(stream_key, destination_url, progress_path)
+    redacted_command = redacted_ffmpeg_command(command)
+    logger.info(
+        "Starting FFmpeg worker %s (%s): %s",
+        worker_key,
+        destination.get("title") or platform_id,
+        " ".join(redacted_command),
+    )
 
     with log_path.open("ab") as log_file:
         log_file.write(f"[{utc_now_iso()}] Starting: {' '.join(redacted_command)}\n".encode("utf-8"))
         log_file.flush()
+        env = os.environ.copy()
+        env.update(
+            {
+                "RESTREAM_WORKER": "1",
+                "RESTREAM_STREAM_KEY": stream_key,
+                "RESTREAM_PLATFORM": platform_id,
+            }
+        )
         process = subprocess.Popen(
             command,
             stdin=subprocess.DEVNULL,
             stdout=log_file,
             stderr=log_file,
             start_new_session=True,
+            env=env,
         )
 
     with process_lock:
-        if ffmpeg_worker_generations.get(stream_key) != generation:
-            logger.warning("Discarding superseded FFmpeg start for %s pid=%s", stream_key, process.pid)
+        if ffmpeg_worker_generations.get(worker_key) != generation:
+            logger.warning("Discarding superseded FFmpeg worker start for %s pid=%s", worker_key, process.pid)
             try:
                 process.kill()
             except OSError:
                 pass
             return False
-        active_processes[stream_key] = {
+        active_processes[worker_key] = {
+            "worker_key": worker_key,
+            "stream_key": stream_key,
+            "platform_id": platform_id,
+            "platform_title": destination.get("title") or platform_title(platform_id),
             "process": process,
             "started_at": utc_now_iso(),
-            "destinations": len(destinations),
+            "destinations": 1,
             "log_path": log_path,
             "progress_path": progress_path,
             "resolution": "",
@@ -1677,11 +1963,50 @@ def start_ffmpeg(stream_key: str, destinations: list[str]) -> bool:
         publisher = active_publishers.get(stream_key)
         if publisher is not None:
             publisher["ffmpeg_started"] = True
-            publisher["destinations"] = len(destinations)
 
-    attach_monitor_threads(stream_key, process, progress_path, input_url=input_url)
+    attach_monitor_threads(worker_key, process, progress_path, input_url=input_url)
     persist_publishers_state()
     return True
+
+
+def start_ffmpeg(stream_key: str, destinations: list[Any]) -> bool:
+    """Start or replace FFmpeg workers for all enabled destinations of a stream."""
+
+    destination_specs = normalize_destination_specs(destinations)
+    if not destination_specs:
+        logger.info("Stream %s accepted without restream destinations", stream_key)
+        return False
+
+    # SRS may retry callbacks; ensure one fresh worker exists per destination.
+    stop_process(stream_key)
+
+    started_count = 0
+    errors: list[str] = []
+    for destination in destination_specs:
+        try:
+            if start_ffmpeg_worker(stream_key, destination):
+                started_count += 1
+        except FileNotFoundError:
+            raise
+        except Exception as exc:
+            errors.append(str(exc))
+            logger.exception(
+                "Failed to start FFmpeg worker for %s platform=%s",
+                stream_key,
+                destination.get("id"),
+            )
+
+    if started_count == 0 and errors:
+        raise RuntimeError("; ".join(errors))
+
+    with process_lock:
+        publisher = active_publishers.get(stream_key)
+        if publisher is not None:
+            publisher["ffmpeg_started"] = started_count > 0
+            publisher["destinations"] = len(destination_specs)
+            publisher["workers_started"] = started_count
+    persist_publishers_state()
+    return started_count > 0
 
 
 def sync_live_restream_worker(user: dict[str, Any]) -> bool:
@@ -1697,7 +2022,7 @@ def sync_live_restream_worker(user: dict[str, Any]) -> bool:
     if publisher is None:
         return False
 
-    destinations = get_enabled_destinations(user)
+    destinations = get_enabled_destination_specs(user)
     if destinations:
         started = start_ffmpeg(stream_key, destinations)
     else:
@@ -2110,7 +2435,7 @@ def health() -> dict[str, Any]:
 
 @app.post("/on_publish")
 async def on_publish(request: Request) -> JSONResponse:
-    """Authorize SRS publishing and start FFmpeg fan-out for enabled platforms."""
+    """Authorize SRS publishing and start FFmpeg workers for enabled platforms."""
 
     verify_srs_webhook(request)
     payload = await parse_srs_payload(request)
@@ -2123,7 +2448,7 @@ async def on_publish(request: Request) -> JSONResponse:
         logger.warning("Rejected publish for inactive or unknown stream key: %s", stream_key)
         return srs_error("stream is not allowed")
 
-    destinations = get_enabled_destinations(user)
+    destinations = get_enabled_destination_specs(user)
     allowed, limit_message = validate_destination_limit(user)
     if not allowed:
         logger.warning("Rejected publish for %s: %s", stream_key, limit_message)

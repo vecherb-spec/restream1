@@ -57,6 +57,49 @@ PLAN_DESTINATION_LIMITS = {
     "admin": ADMIN_MAX_DESTINATIONS,
 }
 
+DESTINATION_SPEC_CONFIGS = (
+    {
+        "id": "yt",
+        "title": "YouTube",
+        "active_field": "yt_active",
+        "url_field": None,
+        "key_field": "yt_key",
+        "base_url": YOUTUBE_RTMP_URL,
+    },
+    {
+        "id": "vk",
+        "title": "VK",
+        "active_field": "vk_active",
+        "url_field": "vk_url",
+        "key_field": "vk_key",
+        "base_url": None,
+    },
+    {
+        "id": "rt",
+        "title": "Rutube",
+        "active_field": "rt_active",
+        "url_field": "rt_url",
+        "key_field": "rt_key",
+        "base_url": None,
+    },
+    {
+        "id": "tg",
+        "title": "Telegram",
+        "active_field": "tg_active",
+        "url_field": "tg_url",
+        "key_field": "tg_key",
+        "base_url": None,
+    },
+    {
+        "id": "custom",
+        "title": "Custom",
+        "active_field": "custom_active",
+        "url_field": "custom_url",
+        "key_field": "custom_key",
+        "base_url": None,
+    },
+)
+
 logger = logging.getLogger("restream.database")
 
 
@@ -816,18 +859,7 @@ def regenerate_user_stream_key(user_id: int) -> tuple[bool, str, str | None]:
 def get_enabled_platform_names(user: dict[str, Any]) -> list[str]:
     """Return human-readable names of enabled destination platforms."""
 
-    platforms: list[str] = []
-    if user.get("yt_active") and user.get("yt_key"):
-        platforms.append("YouTube")
-    if user.get("vk_active") and user.get("vk_url") and user.get("vk_key"):
-        platforms.append("VK")
-    if user.get("rt_active") and user.get("rt_url") and user.get("rt_key"):
-        platforms.append("Rutube")
-    if user.get("tg_active") and user.get("tg_url") and user.get("tg_key"):
-        platforms.append("Telegram")
-    if user.get("custom_active") and user.get("custom_url") and user.get("custom_key"):
-        platforms.append("Custom")
-    return platforms
+    return [spec["title"] for spec in get_enabled_destination_specs(user)]
 
 
 def get_user_destination_limit(user: dict[str, Any]) -> int:
@@ -944,20 +976,34 @@ def validate_destination_urls(user_or_settings: dict[str, Any]) -> tuple[bool, s
 def get_enabled_destinations(user: dict[str, Any]) -> list[str]:
     """Build all enabled RTMP targets for the user's restream settings."""
 
-    destinations: list[str] = []
+    return [spec["url"] for spec in get_enabled_destination_specs(user)]
 
-    if user.get("yt_active") and user.get("yt_key"):
-        destinations.append(build_rtmp_target(YOUTUBE_RTMP_URL, user["yt_key"]))
-    if user.get("vk_active") and user.get("vk_url") and user.get("vk_key"):
-        destinations.append(build_rtmp_target(user["vk_url"], user["vk_key"]))
-    if user.get("rt_active") and user.get("rt_url") and user.get("rt_key"):
-        destinations.append(build_rtmp_target(user["rt_url"], user["rt_key"]))
-    if user.get("tg_active") and user.get("tg_url") and user.get("tg_key"):
-        destinations.append(build_rtmp_target(user["tg_url"], user["tg_key"]))
-    if user.get("custom_active") and user.get("custom_url") and user.get("custom_key"):
-        destinations.append(build_rtmp_target(user["custom_url"], user["custom_key"]))
 
-    return [destination for destination in destinations if destination]
+def get_enabled_destination_specs(user: dict[str, Any]) -> list[dict[str, str]]:
+    """Build enabled destination specs with stable platform ids and RTMP targets."""
+
+    destinations: list[dict[str, str]] = []
+    for config in DESTINATION_SPEC_CONFIGS:
+        if not user.get(config["active_field"]):
+            continue
+        stream_key = str(user.get(config["key_field"]) or "").strip()
+        if not stream_key:
+            continue
+        base_url = config["base_url"]
+        if base_url is None:
+            url_field = config["url_field"]
+            base_url = str(user.get(url_field) or "").strip() if url_field else ""
+        destination_url = build_rtmp_target(str(base_url or ""), stream_key)
+        if not destination_url:
+            continue
+        destinations.append(
+            {
+                "id": str(config["id"]),
+                "title": str(config["title"]),
+                "url": destination_url,
+            }
+        )
+    return destinations
 
 
 try:
