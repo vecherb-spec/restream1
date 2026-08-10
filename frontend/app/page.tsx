@@ -246,24 +246,27 @@ function AuthCard({
   const [resetIdentifier, setResetIdentifier] = useState("");
   const [resetToken, setResetToken] = useState(initialResetToken);
   const [resetNewPassword, setResetNewPassword] = useState("");
-  const [resetLink, setResetLink] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!initialResetToken) {
+      return;
+    }
+    setResetToken(initialResetToken);
+    setMode("reset");
+  }, [initialResetToken]);
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     setError("");
     setMessage("");
-    setResetLink("");
     setLoading(true);
     try {
       if (mode === "forgot") {
         const response = await requestPasswordReset(resetIdentifier);
         setMessage(response.message);
-        if (response.reset_url) {
-          setResetLink(response.reset_url);
-        }
       } else if (mode === "reset") {
         const response = await resetPassword(resetToken, resetNewPassword);
         setMessage(response.message);
@@ -354,11 +357,6 @@ function AuthCard({
         )}
         {error && <div className="error">{error}</div>}
         {message && <div className="alert">{message}</div>}
-        {resetLink && (
-          <a className="button secondary" href={resetLink} style={{ textAlign: "center" }}>
-            Перейти к восстановлению пароля
-          </a>
-        )}
         <button className="button" disabled={loading}>
           {loading
             ? "Подождите..."
@@ -1412,15 +1410,20 @@ function AdminDashboard({
 export default function Home() {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
-  const [resetToken] = useState(() => {
-    if (typeof window === "undefined") {
-      return "";
-    }
-    const params = new URLSearchParams(window.location.search);
-    return params.get("reset_token") || params.get("token") || "";
-  });
+  const [resetToken, setResetToken] = useState("");
 
   useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get("reset_token") || params.get("token") || "";
+    if (token) {
+      setResetToken(token);
+      params.delete("reset_token");
+      params.delete("token");
+      const nextQuery = params.toString();
+      const nextUrl = `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ""}${window.location.hash}`;
+      window.history.replaceState({}, "", nextUrl);
+    }
+
     getMe()
       .then((response) => {
         setUser(response.user);
@@ -1430,11 +1433,21 @@ export default function Home() {
   }, []);
 
   function onAuthenticated(nextUser: User) {
+    setResetToken("");
     setUser(nextUser);
   }
 
   if (loading) {
     return <main className="page">Загрузка...</main>;
+  }
+
+  // Password-reset links must open the reset form even if a session cookie exists.
+  if (resetToken) {
+    return (
+      <main className="page">
+        <AuthCard onAuthenticated={onAuthenticated} initialResetToken={resetToken} />
+      </main>
+    );
   }
 
   return (
@@ -1455,7 +1468,7 @@ export default function Home() {
           }}
         />
       ) : (
-        <AuthCard onAuthenticated={onAuthenticated} initialResetToken={resetToken} />
+        <AuthCard onAuthenticated={onAuthenticated} />
       )}
     </main>
   );

@@ -334,16 +334,14 @@ def get_current_admin(user: dict[str, Any] = Depends(get_current_api_user)) -> d
 
 
 def get_request_client_ip(request: Request) -> str:
-    """Return the best-effort client IP for webhook access checks."""
+    """Return the direct peer IP for webhook auth (never trust X-Forwarded-For)."""
 
-    forwarded = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-    if forwarded:
-        return forwarded
+    # Client-controlled X-Forwarded-For must not authorize SRS webhooks.
     return request.client.host if request.client else ""
 
 
 def verify_srs_webhook(request: Request) -> None:
-    """Allow SRS hooks only from trusted hosts or with a shared secret."""
+    """Allow SRS hooks only from trusted direct peers or with a shared secret."""
 
     client_ip = get_request_client_ip(request)
     if client_ip in SRS_TRUSTED_IPS:
@@ -375,30 +373,30 @@ def password_reset_url(token: str) -> str:
 
 
 def send_password_reset_email(user: dict[str, Any], token: str) -> dict[str, Any]:
-    """Send password reset email or return a direct reset link for the UI."""
+    """Send password reset email. Never expose reset URLs to API clients."""
 
     email = str(user.get("email") or "").strip()
     reset_url = password_reset_url(token)
+    generic_message = (
+        "Если аккаунт существует и для него настроен email, "
+        "мы отправили инструкции по восстановлению пароля."
+    )
     if not email:
-        logger.info("Password reset requested for %s without email. Reset URL: %s", user.get("username"), reset_url)
-        return {
-            "delivery": "link",
-            "message": "У пользователя не указан email. Используйте ссылку ниже.",
-            "reset_url": reset_url,
-        }
+        logger.info(
+            "Password reset requested for %s without email. Reset URL (server-only): %s",
+            user.get("username"),
+            reset_url,
+        )
+        return {"delivery": "none", "message": generic_message}
 
     if not SMTP_HOST:
         logger.warning(
-            "SMTP is not configured. Password reset URL for %s <%s>: %s",
+            "SMTP is not configured. Password reset URL for %s <%s> (server-only): %s",
             user.get("username"),
             email,
             reset_url,
         )
-        return {
-            "delivery": "link",
-            "message": "Письмо не отправлено: SMTP не настроен. Используйте ссылку ниже.",
-            "reset_url": reset_url,
-        }
+        return {"delivery": "none", "message": generic_message}
 
     message = EmailMessage()
     message["Subject"] = "Восстановление пароля MediaLive"
@@ -427,19 +425,15 @@ def send_password_reset_email(user: dict[str, Any], token: str) -> dict[str, Any
                 smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
             smtp.send_message(message)
     except Exception:
-        logger.exception("Failed to send password reset email for %s", user.get("username"))
-        return {
-            "delivery": "link",
-            "message": "Не удалось отправить письмо. Используйте ссылку ниже.",
-            "reset_url": reset_url,
-        }
+        logger.exception(
+            "Failed to send password reset email for %s. Reset URL (server-only): %s",
+            user.get("username"),
+            reset_url,
+        )
+        return {"delivery": "none", "message": generic_message}
 
     logger.info("Password reset email sent to %s for user %s", email, user.get("username"))
-    return {
-        "delivery": "email",
-        "message": f"Письмо для восстановления отправлено на {email}.",
-        "reset_url": None,
-    }
+    return {"delivery": "email", "message": generic_message}
 
 
 def build_pending_user_settings(user: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
@@ -888,6 +882,45 @@ async def stream_status_events(request: Request, stream_key: str) -> Any:
         payload = stream_status_payload(stream_key)
         yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
         await asyncio.sleep(1)
+
+
+def active_streams() -> dict[str, Any]:
+    """Serialize active publishers, FFmpeg workers, and recent exits for admin APIs."""
+
+    with process_lock:
+        streams = [process_snapshot(key, entry) for key, entry in active_processes.items()]
+        publishers = [{"stream_key": key, **value} for key, value in active_publishers.items()]
+        recent = recent_processes[:20]
+    return {"code": 0, "streams": streams, "publishers": publishers, "recent": recent}
+
+
+def stream_logs(stream_key: str, lines: int = 80) -> dict[str, Any]:
+    """Return the latest FFmpeg log lines for an active or recent stream."""
+
+    with process_lock:
+        entry = active_processes.get(stream_key)
+        recent_entry = next(
+            (item for item in recent_processes if item.get("stream_key") == stream_key),
+            None,
+        )
+
+    log_path = entry.get("log_path") if entry else None
+    if log_path is None and recent_entry:
+        log_path = recent_entry.get("log_path")
+    if log_path is None:
+        log_path = find_latest_log_path_for_stream(stream_key)
+
+    if log_path is None:
+        return {"code": 1, "message": "stream log was not found", "lines": []}
+
+    lines_payload = tail_log_file(log_path, lines=lines)
+    return {
+        "code": 0,
+        "stream_key": stream_key,
+        "log_path": str(log_path or ""),
+        "lines": lines_payload,
+        "message": "" if lines_payload else "stream log is empty",
+    }
 
 
 def admin_live_dashboard_payload() -> dict[str, Any]:
@@ -1648,18 +1681,21 @@ def api_logout(
 
 @app.post("/api/auth/forgot-password")
 def api_forgot_password(payload: ForgotPasswordPayload) -> dict[str, Any]:
-    """Request password reset for an existing user."""
+    """Request password reset without revealing whether the account exists."""
 
+    generic_message = (
+        "Если аккаунт существует и для него настроен email, "
+        "мы отправили инструкции по восстановлению пароля."
+    )
     user, token = create_password_reset_token(payload.identifier)
     if user is None or token is None:
-        raise HTTPException(status_code=404, detail="Пользователь не найден.")
+        return {"code": 0, "message": generic_message, "delivery": "none"}
 
     result = send_password_reset_email(user, token)
     return {
         "code": 0,
-        "message": result["message"],
-        "delivery": result["delivery"],
-        "reset_url": result.get("reset_url"),
+        "message": result.get("message") or generic_message,
+        "delivery": result.get("delivery") or "none",
     }
 
 
