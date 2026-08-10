@@ -1031,18 +1031,39 @@ function ClientProfile({
   }
 
   useEffect(() => {
-    reloadProfiles().catch((requestError) => {
-      setProfilesError(requestError instanceof Error ? requestError.message : "Не удалось загрузить площадки");
-    });
+    let active = true;
+    listDestinationProfiles()
+      .then((response) => {
+        if (active) {
+          setProfiles(response.profiles);
+        }
+      })
+      .catch((requestError) => {
+        if (active) {
+          setProfilesError(
+            requestError instanceof Error ? requestError.message : "Не удалось загрузить площадки",
+          );
+        }
+      });
     getNotificationSettings()
       .then((settings) => {
+        if (!active) {
+          return;
+        }
         setNotifySettings(settings);
         setNotifyEnabled(Boolean(settings.telegram_enabled));
         setNotifyChatId(settings.telegram_chat_id_set ? settings.telegram_chat_id_masked || "************" : "");
       })
       .catch((requestError) => {
-        setNotifyError(requestError instanceof Error ? requestError.message : "Не удалось загрузить уведомления");
+        if (active) {
+          setNotifyError(
+            requestError instanceof Error ? requestError.message : "Не удалось загрузить уведомления",
+          );
+        }
       });
+    return () => {
+      active = false;
+    };
   }, []);
 
   async function submitPassword(event: React.FormEvent) {
