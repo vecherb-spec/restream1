@@ -1,0 +1,90 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-restream}
+      POSTGRES_USER: ${POSTGRES_USER:-restream}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-restream} -d ${POSTGRES_DB:-restream}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      RESTREAM_SRS_WEBHOOK_SECRET: ${RESTREAM_SRS_WEBHOOK_SECRET:?RESTREAM_SRS_WEBHOOK_SECRET is required}
+      RESTREAM_BACKUP_DIR: /data/backups
+      RESTREAM_LOG_DIR: /data/logs
+      RESTREAM_STATE_DIR: /data/state
+      SRS_INPUT_URL_TEMPLATE: rtmp://srs/live/{stream_key}
+      # Trusted IPs are informational only; webhook secret is always required.
+      RESTREAM_SRS_TRUSTED_IPS: ${RESTREAM_SRS_TRUSTED_IPS:-127.0.0.1,::1}
+      RESTREAM_ALLOW_INSECURE_DEFAULTS: "false"
+    volumes:
+      - backend-data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Backend API is internal / localhost-only. Put nginx in front for public HTTPS.
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-}
+      NEXT_PUBLIC_OBS_SERVER_URL: ${NEXT_PUBLIC_OBS_SERVER_URL:?NEXT_PUBLIC_OBS_SERVER_URL is required}
+      NEXT_PUBLIC_HLS_BASE_URL: ${NEXT_PUBLIC_HLS_BASE_URL:?NEXT_PUBLIC_HLS_BASE_URL is required}
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3000:3000"
+
+  srs:
+    image: ossrs/srs:5
+    restart: unless-stopped
+    # Render secrets first: ./deploy/scripts/compose_up.sh
+    command: ./objs/srs -c conf/srs.conf
+    volumes:
+      - ./deploy/srs/srs.conf:/usr/local/srs/conf/srs.conf:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      # OBS / encoder ingest (public)
+      - "1935:1935"
+      # SRS HTTP/HLS only on localhost; expose via nginx if needed
+      - "127.0.0.1:8080:8080"
+
+volumes:
+  postgres-data:
+  backend-data:
