@@ -29,6 +29,7 @@ else
 fi
 
 pip install -r requirements.txt -q
+mkdir -p "$REPO_DIR/logs" "$REPO_DIR/state" "$REPO_DIR/backups"
 python3 -c "from database import init_db; init_db(); print('Database schema is up to date.')"
 
 cd frontend
