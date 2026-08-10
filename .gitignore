@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.venv/
+.venv-tests/
+.env
+restream.db
+backups/
+logs/
+state/
+frontend/node_modules/
+frontend/.next/
+frontend/.env.local
+frontend/tsconfig.tsbuildinfo
+*.tsbuildinfo
+# Rendered from deploy/srs/srs.conf.template — never commit secrets.
+deploy/srs/srs.conf

@@ -1,0 +1,26 @@
+listen              1935;
+max_connections     1000;
+daemon              off;
+
+http_server {
+    enabled         on;
+    listen          8080;
+    dir             ./objs/nginx/html;
+}
+
+vhost __defaultVhost__ {
+    http_hooks {
+        enabled         on;
+        # Token is injected from RESTREAM_SRS_WEBHOOK_SECRET at container/start time.
+        on_publish      http://__SRS_BACKEND_HOOK__/on_publish?token=__SRS_WEBHOOK_SECRET__;
+        on_unpublish    http://__SRS_BACKEND_HOOK__/on_unpublish?token=__SRS_WEBHOOK_SECRET__;
+    }
+
+    hls {
+        enabled         on;
+        hls_path        ./objs/nginx/html;
+        hls_fragment    3;
+        hls_window      30;
+        hls_cleanup     on;
+    }
+}
