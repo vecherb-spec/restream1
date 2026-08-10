@@ -4,6 +4,8 @@ set -euo pipefail
 # Full production deploy: pull code, install deps, build frontend, restart services.
 
 REPO_DIR="${RESTREAM_REPO_DIR:-/opt/restream}"
+# Default keeps the current development workflow on cursor/restream-mvp-3225.
+# For stable production hosts prefer: RESTREAM_DEPLOY_BRANCH=main
 BRANCH="${RESTREAM_DEPLOY_BRANCH:-cursor/restream-mvp-3225}"
 
 if [[ ! -d "$REPO_DIR/.git" ]]; then

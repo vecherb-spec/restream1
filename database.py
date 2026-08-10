@@ -15,10 +15,12 @@ import secrets
 import shutil
 import sqlite3
 import subprocess
+import tempfile
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 try:
     from dotenv import load_dotenv
@@ -109,6 +111,85 @@ def normalize_database_url(url: str) -> str:
     if url.startswith("postgres://"):
         return "postgresql://" + url.removeprefix("postgres://")
     return url
+
+
+def parse_postgres_url(url: str) -> dict[str, str]:
+    """Parse a PostgreSQL URL into discrete connection fields (password never logged)."""
+
+    parsed = urlparse(normalize_database_url(url))
+    if parsed.scheme not in {"postgresql", "postgres"}:
+        raise ValueError("DATABASE_URL must be a postgresql:// URL")
+    database = (parsed.path or "").lstrip("/")
+    if not database:
+        raise ValueError("DATABASE_URL is missing a database name")
+    return {
+        "host": parsed.hostname or "localhost",
+        "port": str(parsed.port or 5432),
+        "database": unquote(database),
+        "user": unquote(parsed.username or ""),
+        "password": unquote(parsed.password or ""),
+    }
+
+
+def run_pg_dump_secure(database_url: str, backup_path: Path) -> None:
+    """Run pg_dump without putting the password into process argv.
+
+    Credentials are written to a temporary PGPASSFILE (mode 0600) and removed
+    in a finally block so they do not linger after the dump completes.
+    """
+
+    fields = parse_postgres_url(database_url)
+    passfile_path: str | None = None
+    try:
+        fd, passfile_path = tempfile.mkstemp(prefix="restream-pgpass-", suffix=".pgpass")
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            # hostname:port:database:username:password
+            handle.write(
+                ":".join(
+                    [
+                        fields["host"],
+                        fields["port"],
+                        fields["database"],
+                        fields["user"],
+                        fields["password"].replace("\\", "\\\\").replace(":", "\\:"),
+                    ]
+                )
+                + "\n"
+            )
+
+        env = os.environ.copy()
+        env["PGPASSFILE"] = passfile_path
+        # Prefer passfile auth; do not export PGPASSWORD into the process environment.
+        env.pop("PGPASSWORD", None)
+
+        command = [
+            "pg_dump",
+            "-h",
+            fields["host"],
+            "-p",
+            fields["port"],
+            "-U",
+            fields["user"],
+            "-d",
+            fields["database"],
+            "-f",
+            str(backup_path),
+            "--no-password",
+        ]
+        subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+    finally:
+        if passfile_path:
+            try:
+                os.unlink(passfile_path)
+            except FileNotFoundError:
+                pass
 
 
 class PostgresCursor:
@@ -651,16 +732,15 @@ def create_database_backup() -> dict[str, Any]:
     """Create a timestamped consistent database backup."""
 
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(BACKUP_DIR, 0o700)
+    except OSError:
+        pass
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     if DATABASE_BACKEND == "postgres":
         backup_path = BACKUP_DIR / f"restream_{timestamp}.sql"
-        # Do not log DATABASE_URL — it may contain credentials.
-        subprocess.run(
-            ["pg_dump", normalize_database_url(DATABASE_URL), "-f", str(backup_path)],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        # Password is supplied via temporary PGPASSFILE, never via argv.
+        run_pg_dump_secure(DATABASE_URL, backup_path)
     else:
         backup_path = BACKUP_DIR / f"restream_{timestamp}.db"
         source = sqlite3.connect(f"file:{DATABASE_PATH}?mode=ro", uri=True)
@@ -680,6 +760,10 @@ def create_database_backup() -> dict[str, Any]:
         if not integrity or str(integrity[0]).lower() != "ok":
             backup_path.unlink(missing_ok=True)
             raise RuntimeError(f"SQLite backup failed integrity_check: {integrity}")
+    try:
+        os.chmod(backup_path, 0o600)
+    except OSError:
+        pass
     return {
         "path": str(backup_path),
         "filename": backup_path.name,
