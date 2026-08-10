@@ -80,6 +80,7 @@ from database import (
     update_restream_settings,
     update_user_password,
     validate_destination_limit,
+    validate_destination_urls,
 )
 
 
@@ -192,6 +193,7 @@ active_processes: dict[str, dict[str, Any]] = {}
 active_publishers: dict[str, dict[str, Any]] = {}
 recent_processes: list[dict[str, Any]] = []
 ffmpeg_restart_counts: dict[str, int] = {}
+ffmpeg_worker_generations: dict[str, int] = {}
 process_lock = threading.Lock()
 
 
@@ -532,7 +534,7 @@ def find_latest_log_path_for_stream(stream_key: str) -> Path | None:
 
 
 def find_latest_log_path_for_username(username: str) -> Path | None:
-    """Find the newest FFmpeg log for any stream key generated for a username."""
+    """Find the newest FFmpeg log for stream keys belonging to this username only."""
 
     safe_username = "".join(
         char.lower() if char.isalnum() else "_" for char in (username or "user")
@@ -541,10 +543,14 @@ def find_latest_log_path_for_username(username: str) -> Path | None:
     if not LOG_DIR.exists() or not LOG_DIR.is_dir():
         return None
 
+    # Require live_{username}_{12hex}_{timestamp}.log so "a" cannot match "alice".
+    name_re = re.compile(
+        rf"^ffmpeg_live_{re.escape(safe_username)}_[a-f0-9]{{12}}_\d{{8}}_\d{{6}}\.log$"
+    )
     candidates = [
         path
         for path in LOG_DIR.glob(f"ffmpeg_live_{safe_username}_*.log")
-        if path.is_file()
+        if path.is_file() and name_re.match(path.name)
     ]
     if not candidates:
         return None
@@ -1328,10 +1334,19 @@ def recover_ffmpeg_workers_on_startup() -> dict[str, int]:
             continue
         user = get_active_user_by_stream_key(stream_key)
         if user is None:
+            forget_publisher(stream_key)
             continue
         allowed, _message = validate_destination_limit(user)
         destinations = get_enabled_destinations(user)
         if not allowed or not destinations:
+            forget_publisher(stream_key)
+            continue
+        if not srs_input_seems_live(stream_key):
+            logger.info(
+                "Skip FFmpeg recovery for %s: SRS input is not live",
+                stream_key,
+            )
+            forget_publisher(stream_key)
             continue
         with process_lock:
             active_publishers[stream_key] = {
@@ -1385,9 +1400,47 @@ def build_ffmpeg_command(
     return command
 
 
+def bump_ffmpeg_generation(stream_key: str) -> int:
+    """Invalidate in-flight FFmpeg starts for a stream key and return the new generation."""
+
+    with process_lock:
+        next_generation = ffmpeg_worker_generations.get(stream_key, 0) + 1
+        ffmpeg_worker_generations[stream_key] = next_generation
+        return next_generation
+
+
+def srs_input_seems_live(stream_key: str) -> bool:
+    """Probe whether SRS still has a publishable input for this stream key."""
+
+    input_url = SRS_INPUT_URL_TEMPLATE.format(stream_key=stream_key)
+    try:
+        result = subprocess.run(
+            [
+                FFPROBE_BIN,
+                "-v",
+                "error",
+                "-rw_timeout",
+                "2000000",
+                "-show_entries",
+                "format=format_name",
+                "-of",
+                "csv=p=0",
+                input_url,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=4,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
+    return result.returncode == 0 and bool((result.stdout or "").strip())
+
+
 def stop_process(stream_key: str, *, clear_restart_state: bool = False) -> bool:
     """Terminate a running FFmpeg worker for a stream key."""
 
+    bump_ffmpeg_generation(stream_key)
     with process_lock:
         entry = active_processes.pop(stream_key, None)
 
@@ -1439,6 +1492,7 @@ def maybe_restart_ffmpeg(stream_key: str, return_code: int) -> None:
     with process_lock:
         still_published = stream_key in active_publishers
         restart_count = ffmpeg_restart_counts.get(stream_key, 0)
+        generation_before_sleep = ffmpeg_worker_generations.get(stream_key, 0)
 
     if not still_published:
         return
@@ -1474,6 +1528,12 @@ def maybe_restart_ffmpeg(stream_key: str, return_code: int) -> None:
 
     with process_lock:
         if stream_key not in active_publishers:
+            return
+        if ffmpeg_worker_generations.get(stream_key, 0) != generation_before_sleep:
+            return
+        current = active_processes.get(stream_key)
+        if current and current.get("process") is not None and current["process"].poll() is None:
+            # A newer healthy worker already replaced the crashed one.
             return
 
     logger.warning(
@@ -1571,6 +1631,7 @@ def start_ffmpeg(stream_key: str, destinations: list[str]) -> bool:
 
     # SRS may retry callbacks; ensure only one worker exists per stream key.
     stop_process(stream_key)
+    generation = bump_ffmpeg_generation(stream_key)
 
     input_url = SRS_INPUT_URL_TEMPLATE.format(stream_key=stream_key)
     log_path = log_path_for_stream(stream_key)
@@ -1581,7 +1642,7 @@ def start_ffmpeg(stream_key: str, destinations: list[str]) -> bool:
     command = build_ffmpeg_command(stream_key, destinations, progress_path)
     redacted_command = command[:]
     for index, value in enumerate(redacted_command):
-        if value.startswith("rtmp://") and index > 0:
+        if value.startswith(("rtmp://", "rtmps://")) and index > 0:
             redacted_command[index] = "[RTMP_OUTPUT_REDACTED]"
     logger.info("Starting FFmpeg for %s: %s", stream_key, " ".join(redacted_command))
 
@@ -1593,9 +1654,17 @@ def start_ffmpeg(stream_key: str, destinations: list[str]) -> bool:
             stdin=subprocess.DEVNULL,
             stdout=log_file,
             stderr=log_file,
+            start_new_session=True,
         )
 
     with process_lock:
+        if ffmpeg_worker_generations.get(stream_key) != generation:
+            logger.warning("Discarding superseded FFmpeg start for %s pid=%s", stream_key, process.pid)
+            try:
+                process.kill()
+            except OSError:
+                pass
+            return False
         active_processes[stream_key] = {
             "process": process,
             "started_at": utc_now_iso(),
@@ -1603,6 +1672,7 @@ def start_ffmpeg(stream_key: str, destinations: list[str]) -> bool:
             "log_path": log_path,
             "progress_path": progress_path,
             "resolution": "",
+            "generation": generation,
         }
         publisher = active_publishers.get(stream_key)
         if publisher is not None:
@@ -1739,6 +1809,9 @@ def api_update_my_settings(
         allowed, message = validate_destination_limit(pending_user)
         if not allowed:
             raise HTTPException(status_code=400, detail=message)
+        urls_ok, urls_message = validate_destination_urls(pending_user)
+        if not urls_ok:
+            raise HTTPException(status_code=400, detail=urls_message)
         update_restream_settings(int(user["id"]), settings)
 
     if stream_title is not None:
@@ -1933,7 +2006,17 @@ def api_admin_set_user_plan(
     success, message = update_user_plan(user_id, payload.plan, payload.max_destinations)
     if not success:
         raise HTTPException(status_code=400, detail=message)
-    return {"code": 0, "message": message, "user": public_user(get_user_by_id(user_id))}
+    fresh_user = get_user_by_id(user_id)
+    if fresh_user is not None:
+        allowed, limit_message = validate_destination_limit(fresh_user)
+        if not allowed:
+            # Downgrade must stop an over-limit live restream until the client trims destinations.
+            stop_process(str(fresh_user.get("stream_key") or ""), clear_restart_state=True)
+            forget_publisher(str(fresh_user.get("stream_key") or ""))
+            message = f"{message} {limit_message} Активный рестрим остановлен."
+        else:
+            sync_live_restream_worker(fresh_user)
+    return {"code": 0, "message": message, "user": public_user(fresh_user)}
 
 
 @app.post("/api/admin/users/{user_id}/stream-key")

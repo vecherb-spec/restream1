@@ -156,15 +156,21 @@ def hash_password(password: str) -> str:
     return f"pbkdf2_sha256${salt}${digest}"
 
 
+def is_password_hashed(stored_password: str) -> bool:
+    """Return True when the stored password uses the current PBKDF2 format."""
+
+    parts = (stored_password or "").split("$")
+    return len(parts) == 3 and parts[0] == "pbkdf2_sha256"
+
+
 def verify_password(password: str, stored_password: str) -> bool:
     """Verify PBKDF2 hashes while still accepting legacy plaintext values."""
 
     if not stored_password:
         return False
 
-    parts = stored_password.split("$")
-    if len(parts) == 3 and parts[0] == "pbkdf2_sha256":
-        _, salt, expected_digest = parts
+    if is_password_hashed(stored_password):
+        _, salt, expected_digest = stored_password.split("$", 2)
         actual_digest = hashlib.pbkdf2_hmac(
             "sha256",
             password.encode("utf-8"),
@@ -173,8 +179,15 @@ def verify_password(password: str, stored_password: str) -> bool:
         ).hex()
         return secrets.compare_digest(actual_digest, expected_digest)
 
-    # MVP-friendly fallback if older rows were created with plaintext passwords.
+    # Legacy plaintext rows are accepted once, then upgraded on successful login.
     return secrets.compare_digest(password, stored_password)
+
+
+def delete_auth_sessions_for_user(user_id: int) -> None:
+    """Invalidate all web sessions for a user."""
+
+    with get_connection() as connection:
+        connection.execute("DELETE FROM auth_sessions WHERE user_id = ?", (user_id,))
 
 
 def generate_stream_key(username: str | None = None) -> str:
@@ -380,6 +393,8 @@ def create_user(username: str, password: str, email: str) -> tuple[bool, str, di
     email = email.strip()
     if not username or not password:
         return False, "Логин и пароль обязательны.", None
+    if len(password) < 8:
+        return False, "Пароль должен быть не короче 8 символов.", None
 
     with get_connection() as connection:
         for _ in range(5):
@@ -426,9 +441,18 @@ def authenticate_user(username: str, password: str) -> dict[str, Any] | None:
         ).fetchone()
 
     user = row_to_dict(row)
-    if user and user["is_active"] and verify_password(password, user["password"]):
-        return user
-    return None
+    if not user or not user["is_active"] or not verify_password(password, user["password"]):
+        return None
+
+    if not is_password_hashed(str(user.get("password") or "")):
+        with get_connection() as connection:
+            connection.execute(
+                "UPDATE users SET password = ? WHERE id = ?",
+                (hash_password(password), int(user["id"])),
+            )
+        fresh = get_user_by_id(int(user["id"]))
+        return fresh or user
+    return user
 
 
 def hash_session_token(token: str) -> str:
@@ -721,7 +745,7 @@ def update_stream_title(user_id: int, stream_title: str) -> tuple[bool, str]:
 
 
 def update_user_password(user_id: int, new_password: str) -> tuple[bool, str]:
-    """Set a new password hash for a user."""
+    """Set a new password hash for a user and revoke existing sessions."""
 
     if len(new_password) < 8:
         return False, "Пароль должен быть не короче 8 символов."
@@ -731,9 +755,9 @@ def update_user_password(user_id: int, new_password: str) -> tuple[bool, str]:
             "UPDATE users SET password = ? WHERE id = ?",
             (hash_password(new_password), user_id),
         )
-
-    if cursor.rowcount == 0:
-        return False, "Пользователь не найден."
+        if cursor.rowcount == 0:
+            return False, "Пользователь не найден."
+    delete_auth_sessions_for_user(user_id)
     return True, "Пароль обновлен."
 
 
@@ -760,7 +784,8 @@ def change_user_password(
             "UPDATE users SET password = ? WHERE id = ?",
             (hash_password(new_password), user_id),
         )
-    return True, "Пароль обновлен."
+    delete_auth_sessions_for_user(user_id)
+    return True, "Пароль обновлен. Войдите снова с новым паролем."
 
 
 def regenerate_user_stream_key(user_id: int) -> tuple[bool, str, str | None]:
@@ -875,6 +900,13 @@ def update_restream_settings(user_id: int, settings: dict[str, Any]) -> None:
         )
 
 
+def is_allowed_rtmp_base_url(base_url: str) -> bool:
+    """Allow only RTMP/RTMPS destination bases for FFmpeg outputs."""
+
+    lowered = (base_url or "").strip().lower()
+    return lowered.startswith("rtmp://") or lowered.startswith("rtmps://")
+
+
 def build_rtmp_target(base_url: str, stream_key: str) -> str:
     """Join an RTMP base URL and platform stream key into one FFmpeg target."""
 
@@ -882,7 +914,31 @@ def build_rtmp_target(base_url: str, stream_key: str) -> str:
     stream_key = (stream_key or "").strip()
     if not base_url or not stream_key:
         return ""
+    if not is_allowed_rtmp_base_url(base_url):
+        return ""
+    if any(token in stream_key for token in ("://", " ", "\n", "\r", "\t")):
+        return ""
     return f"{base_url.rstrip('/')}/{stream_key.lstrip('/')}"
+
+
+def validate_destination_urls(user_or_settings: dict[str, Any]) -> tuple[bool, str]:
+    """Reject enabled destinations that are not RTMP/RTMPS URLs."""
+
+    checks = (
+        ("VK", "vk_active", "vk_url"),
+        ("Rutube", "rt_active", "rt_url"),
+        ("Telegram", "tg_active", "tg_url"),
+        ("Custom", "custom_active", "custom_url"),
+    )
+    for label, active_field, url_field in checks:
+        if not user_or_settings.get(active_field):
+            continue
+        base_url = str(user_or_settings.get(url_field) or "").strip()
+        if not base_url:
+            continue
+        if not is_allowed_rtmp_base_url(base_url):
+            return False, f"{label}: URL должен начинаться с rtmp:// или rtmps://"
+    return True, ""
 
 
 def get_enabled_destinations(user: dict[str, Any]) -> list[str]:

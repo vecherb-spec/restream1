@@ -273,11 +273,14 @@ function AuthCard({
         setPassword("");
         setMode("login");
       } else {
-        const response =
-          mode === "login"
-            ? await login(username, password)
-            : await register(username, password, email);
-        onAuthenticated(response.user);
+        if (mode === "login") {
+          await login(username, password);
+        } else {
+          await register(username, password, email);
+        }
+        // Confirm the HttpOnly session cookie actually works before entering the app.
+        const me = await getMe();
+        onAuthenticated(me.user);
       }
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Ошибка запроса");
@@ -323,6 +326,7 @@ function AuthCard({
                 type="password"
                 value={resetNewPassword}
                 onChange={(event) => setResetNewPassword(event.target.value)}
+                minLength={8}
                 required
               />
             </label>
@@ -350,6 +354,7 @@ function AuthCard({
                 type="password"
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
+                minLength={mode === "register" ? 8 : undefined}
                 required
               />
             </label>
@@ -399,15 +404,16 @@ function SettingsForm({
   const [savingCredentials, setSavingCredentials] = useState(false);
   const enabledDestinations = countEnabledDestinations(settings);
   const maxDestinations = getEffectiveMaxDestinations(user);
-  const streamIsOnAir = Boolean(
-    streamStatus?.publisher || streamStatus?.process?.status === "running",
-  );
+  const platformsBusy = savingPlatform !== null || savingCredentials;
 
   function updateText(key: keyof RestreamSettings, value: string) {
     setSettings((current) => ({ ...current, [key]: value }));
   }
 
   async function togglePlatform(platform: PlatformConfig, nextActive: boolean) {
+    if (platformsBusy) {
+      return;
+    }
     setError("");
     setMessage("");
     const nextSettings = {
@@ -431,6 +437,7 @@ function SettingsForm({
     try {
       const response = await updateSettings(nextSettings);
       onSaved(response.user);
+      setSettings(userToSettings(response.user));
       setMessage(`${platform.title}: ${nextActive ? "Start выполнен" : "Stop выполнен"}.`);
     } catch (requestError) {
       setSettings(previousSettings);
@@ -479,27 +486,30 @@ function SettingsForm({
         const active = Boolean(settings[platform.activeKey]);
         const configured = isPlatformConfigured(platform, settings);
         const platformStatus = getPlatformStatus(streamStatus, platform.id);
-        const live = platformStatus?.state === "live" || (active && streamIsOnAir);
-        const stateClass = live ? "live" : platformStatus?.color || (active ? "yellow" : "gray");
+        const live = platformStatus?.state === "live";
+        const stateClass = platformStatus?.color || (active ? "yellow" : "gray");
         const startWouldExceedLimit =
           !active &&
           configured &&
           countEnabledDestinations({ ...settings, [platform.activeKey]: true }) > maxDestinations;
-        const disabled = savingPlatform === platform.id;
+        const disabled = platformsBusy || startWouldExceedLimit;
         return (
           <div className={`platform-row ${live ? "live" : active ? "enabled" : ""}`} key={platform.id}>
             <div className="platform-state">
               <span className={`platform-live-dot ${stateClass}`} />
               <div>
                 <strong>{platform.title}</strong>
-                <small>{platformStatus?.label || (live ? "В эфире" : active ? "Включена, ждет VideoCoder" : "Остановлена")}</small>
+                <small>
+                  {platformStatus?.label ||
+                    (active ? "Включена, ждет VideoCoder" : "Остановлена")}
+                </small>
                 {platformStatus?.reason && <small className="platform-reason">{platformStatus.reason}</small>}
               </div>
             </div>
             <input
               placeholder="RTMP URL"
               value={platform.fixedUrl || (platform.urlKey ? String(settings[platform.urlKey]) : "")}
-              disabled={Boolean(platform.fixedUrl)}
+              disabled={Boolean(platform.fixedUrl) || platformsBusy}
               onChange={(event) => {
                 if (platform.urlKey) {
                   updateText(platform.urlKey, event.target.value);
@@ -509,6 +519,7 @@ function SettingsForm({
             <input
               placeholder="Stream key"
               value={String(settings[platform.streamKey])}
+              disabled={platformsBusy}
               onChange={(event) => updateText(platform.streamKey, event.target.value)}
             />
             <button
@@ -1078,9 +1089,14 @@ function AdminDashboard({
   }
 
   async function toggleUser(userId: number, isActive: boolean) {
-    await setAdminUserActive(userId, isActive);
-    setMessage(isActive ? "Пользователь разблокирован." : "Пользователь заблокирован.");
-    await loadStaticAdminData();
+    setError("");
+    try {
+      await setAdminUserActive(userId, isActive);
+      setMessage(isActive ? "Пользователь разблокирован." : "Пользователь заблокирован.");
+      await loadStaticAdminData();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Не удалось изменить статус");
+    }
   }
 
   async function resetPassword(userId: number) {
@@ -1088,8 +1104,13 @@ function AdminDashboard({
     if (!newPassword) {
       return;
     }
-    await resetAdminUserPassword(userId, newPassword);
-    setMessage("Пароль обновлен.");
+    setError("");
+    try {
+      await resetAdminUserPassword(userId, newPassword);
+      setMessage("Пароль обновлен. Сессии пользователя сброшены.");
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Не удалось обновить пароль");
+    }
   }
 
   async function applyPlanPreset(userId: number, presetPlan: string) {
@@ -1098,34 +1119,79 @@ function AdminDashboard({
       setError("Неизвестный тариф.");
       return;
     }
-    await updateAdminUserPlan(userId, preset.plan, preset.maxDestinations);
-    setMessage(`Тариф обновлен: ${preset.title}.`);
-    await loadStaticAdminData();
+    setError("");
+    try {
+      const response = await updateAdminUserPlan(userId, preset.plan, preset.maxDestinations);
+      setMessage(response.message || `Тариф обновлен: ${preset.title}.`);
+      await loadStaticAdminData();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Не удалось обновить тариф");
+    }
   }
 
   async function resetStreamKey(userId: number) {
     if (!window.confirm("Сбросить stream key пользователя? Старый ключ перестанет работать.")) {
       return;
     }
-    const response = await resetAdminUserStreamKey(userId);
-    setMessage(`Новый stream key: ${response.stream_key}`);
-    await loadStaticAdminData();
+    setError("");
+    try {
+      const response = await resetAdminUserStreamKey(userId);
+      setMessage(`Новый stream key: ${response.stream_key}`);
+      await loadStaticAdminData();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Не удалось сбросить stream key");
+    }
   }
 
   async function stopStream(streamKey: string) {
-    await stopAdminStream(streamKey);
-    setMessage("Эфир остановлен.");
+    setError("");
+    try {
+      await stopAdminStream(streamKey);
+      setMessage("Эфир остановлен.");
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Не удалось остановить эфир");
+    }
   }
 
   async function showLogs(streamKey: string) {
-    const response = await getAdminStreamLogs(streamKey);
-    setLogLines(response.lines || []);
+    setError("");
+    try {
+      const response = await getAdminStreamLogs(streamKey);
+      setLogLines(response.lines || []);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Не удалось загрузить логи");
+    }
   }
 
   async function createBackup() {
-    const response = await createAdminBackup();
-    setMessage(`Backup создан: ${response.backup.filename}`);
-    await loadStaticAdminData();
+    setError("");
+    try {
+      const response = await createAdminBackup();
+      setMessage(`Backup создан: ${response.backup.filename}`);
+      await loadStaticAdminData();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Не удалось создать backup");
+    }
+  }
+
+  function maskStreamKey(streamKey: string) {
+    if (!streamKey) {
+      return "—";
+    }
+    if (streamKey.length <= 10) {
+      return "••••••••";
+    }
+    return `${streamKey.slice(0, 8)}…${streamKey.slice(-4)}`;
+  }
+
+  async function copyStreamKey(streamKey: string) {
+    setError("");
+    try {
+      await navigator.clipboard.writeText(streamKey);
+      setMessage("Stream key скопирован.");
+    } catch {
+      setError("Не удалось скопировать stream key.");
+    }
   }
 
   const backupTitle = databaseBackend === "postgres" ? "Backup PostgreSQL" : "Backup SQLite";
@@ -1294,7 +1360,18 @@ function AdminDashboard({
                       </select>
                     </td>
                     <td>{item.max_destinations ?? 1}</td>
-                    <td>{item.stream_key}</td>
+                    <td title={item.stream_key}>
+                      <div className="actions">
+                        <code>{maskStreamKey(item.stream_key)}</code>
+                        <button
+                          className="button secondary"
+                          type="button"
+                          onClick={() => copyStreamKey(item.stream_key)}
+                        >
+                          Copy
+                        </button>
+                      </div>
+                    </td>
                     <td>{active ? "Да" : "Нет"}</td>
                     <td>
                       <div className="actions">
