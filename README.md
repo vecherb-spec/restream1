@@ -371,7 +371,8 @@ apt-get install -y python3-venv docker-compose-v2   # once
 ```
 
 The script creates `.venv-tests` automatically (PEP 668 safe) and supports both
-`docker compose` and legacy `docker-compose`.
+`docker compose` and legacy `docker-compose`. Test Postgres listens on
+`127.0.0.1:55432` so it does not conflict with production `:5432`.
 
 Do **not** run bare `docker` / bare `pytest`.
 

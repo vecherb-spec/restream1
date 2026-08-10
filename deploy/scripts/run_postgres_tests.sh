@@ -78,13 +78,14 @@ resolve_compose() {
 ensure_test_venv
 resolve_compose
 
+# Bind test Postgres on 55432 so production :5432 can keep running.
 export POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-restream_test_password}"
-export DATABASE_URL="${DATABASE_URL:-postgresql://restream:restream_test_password@127.0.0.1:5432/restream_test}"
+export DATABASE_URL="${DATABASE_URL:-postgresql://restream:restream_test_password@127.0.0.1:55432/restream_test}"
 export RESTREAM_SRS_WEBHOOK_SECRET="${RESTREAM_SRS_WEBHOOK_SECRET:-unit-test-srs-secret-value-16}"
 export NEXT_PUBLIC_OBS_SERVER_URL="${NEXT_PUBLIC_OBS_SERVER_URL:-rtmp://localhost/live}"
 export NEXT_PUBLIC_HLS_BASE_URL="${NEXT_PUBLIC_HLS_BASE_URL:-http://localhost:8080/live}"
 
-TEST_URL="${RESTREAM_TEST_DATABASE_URL:-postgresql://restream:restream_test_password@127.0.0.1:5432/restream_test}"
+TEST_URL="${RESTREAM_TEST_DATABASE_URL:-postgresql://restream:restream_test_password@127.0.0.1:55432/restream_test}"
 
 cleanup() {
   "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
