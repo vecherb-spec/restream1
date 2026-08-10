@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Restream MediaLive",
+  title: "Medialive restream",
   description: "Client dashboard for SRS/FFmpeg restreaming",
 };
 

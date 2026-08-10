@@ -291,8 +291,7 @@ function AuthCard({
 
   return (
     <div className="card" style={{ maxWidth: 460, margin: "80px auto" }}>
-      <h1>Restream MediaLive</h1>
-      <p className="muted">Новый Next.js кабинет поверх FastAPI API.</p>
+      <h1>Medialive restream</h1>
       <div className="tabs">
         <button className={`tab ${mode === "login" ? "active" : ""}`} onClick={() => setMode("login")}>
           Вход
@@ -1548,7 +1547,7 @@ export default function Home() {
     return (
       <main className="page">
         <div className="card" style={{ maxWidth: 460, margin: "80px auto" }}>
-          <h1>Restream MediaLive</h1>
+          <h1>Medialive restream</h1>
           <div className="error">{bootError}</div>
           <p className="muted">
             Страница открылась, но запрос к API не завершился. Часто помогает VPN или другой DNS
