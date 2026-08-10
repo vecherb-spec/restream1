@@ -25,7 +25,9 @@ services:
       DATABASE_URL: ${DATABASE_URL:-postgresql://restream:change_me@postgres:5432/restream}
       RESTREAM_BACKUP_DIR: /data/backups
       RESTREAM_LOG_DIR: /data/logs
+      RESTREAM_STATE_DIR: /data/state
       SRS_INPUT_URL_TEMPLATE: rtmp://srs/live/{stream_key}
+      RESTREAM_SRS_TRUSTED_IPS: 127.0.0.1,::1,srs
     volumes:
       - backend-data:/data
     depends_on:
@@ -53,6 +55,8 @@ services:
   srs:
     image: ossrs/srs:5
     restart: unless-stopped
+    # Render secrets first: RESTREAM_SRS_BACKEND_HOOK=backend:8000 ./deploy/scripts/render_srs_conf.sh
+    # or use ./deploy/scripts/compose_up.sh
     command: ./objs/srs -c conf/srs.conf
     volumes:
       - ./deploy/srs/srs.conf:/usr/local/srs/conf/srs.conf:ro

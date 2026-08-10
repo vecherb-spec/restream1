@@ -25,6 +25,7 @@ USER_FIELDS = [
     "role",
     "plan",
     "max_destinations",
+    "stream_title",
     "stream_key",
     "is_active",
     "yt_active",
@@ -59,10 +60,24 @@ def read_sqlite_users(sqlite_path: Path) -> list[dict[str, Any]]:
     connection = sqlite3.connect(sqlite_path)
     connection.row_factory = sqlite3.Row
     try:
+        available = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(users)").fetchall()
+        }
+        fields = [field for field in USER_FIELDS if field in available]
+        if not fields:
+            raise RuntimeError("SQLite users table has no migratable columns")
         rows = connection.execute(
-            f"SELECT {', '.join(USER_FIELDS)} FROM users ORDER BY id"
+            f"SELECT {', '.join(fields)} FROM users ORDER BY id"
         ).fetchall()
-        return [dict(row) for row in rows]
+        users: list[dict[str, Any]] = []
+        for row in rows:
+            payload = {field: None for field in USER_FIELDS}
+            payload.update(dict(row))
+            if not payload.get("stream_title"):
+                payload["stream_title"] = "Live"
+            users.append(payload)
+        return users
     finally:
         connection.close()
 

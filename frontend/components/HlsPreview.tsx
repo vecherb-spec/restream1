@@ -1,25 +1,11 @@
 "use client";
 
+import Hls from "hls.js";
 import { useEffect, useMemo, useRef } from "react";
 import { HLS_BASE_URL } from "@/lib/api";
 
 type HlsPreviewProps = {
   streamKey: string;
-};
-
-type HlsConstructor = new (options?: Record<string, unknown>) => {
-  loadSource: (source: string) => void;
-  attachMedia: (video: HTMLVideoElement) => void;
-  on: (event: string, callback: (event: unknown, data: { fatal?: boolean }) => void) => void;
-  destroy: () => void;
-};
-
-type HlsGlobal = HlsConstructor & {
-  isSupported: () => boolean;
-  Events: {
-    MANIFEST_PARSED: string;
-    ERROR: string;
-  };
 };
 
 export function HlsPreview({ streamKey }: HlsPreviewProps) {
@@ -32,34 +18,31 @@ export function HlsPreview({ streamKey }: HlsPreviewProps) {
       return;
     }
 
-    let hls: InstanceType<HlsConstructor> | null = null;
+    let hls: Hls | null = null;
     if (video.canPlayType("application/vnd.apple.mpegurl")) {
       video.src = sourceUrl;
       video.play().catch(() => undefined);
+      return () => {
+        video.removeAttribute("src");
+        video.load();
+      };
+    }
+
+    if (!Hls.isSupported()) {
       return;
     }
 
-    const script = document.createElement("script");
-    script.src = "https://cdn.jsdelivr.net/npm/hls.js@latest";
-    script.async = true;
-    script.onload = () => {
-      const Hls = (window as unknown as { Hls?: HlsGlobal }).Hls;
-      if (!Hls?.isSupported()) {
-        return;
-      }
-
-      hls = new Hls({ lowLatencyMode: true, liveSyncDurationCount: 3 });
-      hls.loadSource(sourceUrl);
-      hls.attachMedia(video);
-      hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        video.play().catch(() => undefined);
-      });
-    };
-    document.body.appendChild(script);
+    hls = new Hls({ lowLatencyMode: true, liveSyncDurationCount: 3 });
+    hls.loadSource(sourceUrl);
+    hls.attachMedia(video);
+    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      video.play().catch(() => undefined);
+    });
 
     return () => {
       hls?.destroy();
-      script.remove();
+      video.removeAttribute("src");
+      video.load();
     };
   }, [sourceUrl]);
 

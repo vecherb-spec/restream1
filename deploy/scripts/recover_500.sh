@@ -60,22 +60,20 @@ echo "[OK] Database: $FOUND_DB"
 
 echo
 echo "[4/8] Fix .env database settings..."
-# Remove broken PostgreSQL URL if postgres is not running
+# Never auto-clear DATABASE_URL just because localhost:5432 is closed.
+# Remote/managed Postgres is common; clearing it can silently switch production to SQLite.
 if grep -qE '^DATABASE_URL=(postgresql|postgres)://' "$ENV_FILE"; then
-  if ! timeout 2 bash -c 'echo >/dev/tcp/127.0.0.1/5432' 2>/dev/null; then
-    sed -i 's|^DATABASE_URL=.*|DATABASE_URL=|' "$ENV_FILE"
-    echo "[FIX] Cleared DATABASE_URL (PostgreSQL not running, using SQLite)"
-  else
-    echo "[OK] PostgreSQL port 5432 is open, keeping DATABASE_URL"
-  fi
-fi
-
-if grep -q '^RESTREAM_DB_PATH=' "$ENV_FILE"; then
-  sed -i "s|^RESTREAM_DB_PATH=.*|RESTREAM_DB_PATH=$FOUND_DB|" "$ENV_FILE"
+  DB_URL="$(grep -E '^DATABASE_URL=(postgresql|postgres)://' "$ENV_FILE" | head -1 | cut -d= -f2-)"
+  echo "[OK] Keeping DATABASE_URL (Postgres mode). Will validate via Python next."
+  echo "     $DB_URL"
 else
-  echo "RESTREAM_DB_PATH=$FOUND_DB" >> "$ENV_FILE"
+  if grep -q '^RESTREAM_DB_PATH=' "$ENV_FILE"; then
+    sed -i "s|^RESTREAM_DB_PATH=.*|RESTREAM_DB_PATH=$FOUND_DB|" "$ENV_FILE"
+  else
+    echo "RESTREAM_DB_PATH=$FOUND_DB" >> "$ENV_FILE"
+  fi
+  echo "[OK] RESTREAM_DB_PATH=$FOUND_DB"
 fi
-echo "[OK] RESTREAM_DB_PATH=$FOUND_DB"
 
 echo
 echo "[5/8] Test database from Python..."

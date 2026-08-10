@@ -206,8 +206,11 @@ def is_password_hashed(stored_password: str) -> bool:
     return len(parts) == 3 and parts[0] == "pbkdf2_sha256"
 
 
+ALLOW_PLAINTEXT_PASSWORDS = os.getenv("RESTREAM_ALLOW_PLAINTEXT_PASSWORDS", "false").lower() == "true"
+
+
 def verify_password(password: str, stored_password: str) -> bool:
-    """Verify PBKDF2 hashes while still accepting legacy plaintext values."""
+    """Verify PBKDF2 hashes; plaintext fallback is opt-in only."""
 
     if not stored_password:
         return False
@@ -222,7 +225,10 @@ def verify_password(password: str, stored_password: str) -> bool:
         ).hex()
         return secrets.compare_digest(actual_digest, expected_digest)
 
-    # Legacy plaintext rows are accepted once, then upgraded on successful login.
+    if not ALLOW_PLAINTEXT_PASSWORDS:
+        return False
+
+    # Legacy plaintext rows (only when explicitly enabled).
     return secrets.compare_digest(password, stored_password)
 
 
@@ -831,6 +837,18 @@ def change_user_password(
     return True, "Пароль обновлен. Войдите снова с новым паролем."
 
 
+def is_unique_violation(exc: Exception) -> bool:
+    """Return True for SQLite/Postgres unique constraint failures."""
+
+    if isinstance(exc, sqlite3.IntegrityError):
+        return True
+    # psycopg2 / psycopg3 unique violations
+    if exc.__class__.__name__ in {"UniqueViolation", "IntegrityError"}:
+        return True
+    text = str(exc).lower()
+    return "unique" in text or "duplicate key" in text or "already exists" in text
+
+
 def regenerate_user_stream_key(user_id: int) -> tuple[bool, str, str | None]:
     """Generate and store a new OBS/SRS stream key for a user."""
 
@@ -850,8 +868,10 @@ def regenerate_user_stream_key(user_id: int) -> tuple[bool, str, str | None]:
                     (stream_key, user_id),
                 )
                 return True, "Новый stream key сгенерирован.", stream_key
-            except sqlite3.IntegrityError:
-                continue
+            except Exception as exc:
+                if is_unique_violation(exc):
+                    continue
+                raise
 
     return False, "Не удалось сгенерировать уникальный stream key.", None
 
@@ -862,18 +882,35 @@ def get_enabled_platform_names(user: dict[str, Any]) -> list[str]:
     return [spec["title"] for spec in get_enabled_destination_specs(user)]
 
 
-def get_user_destination_limit(user: dict[str, Any]) -> int:
-    """Return max allowed active restream destinations for a user."""
+def get_plan_destination_limit(user: dict[str, Any]) -> int:
+    """Return the default destination limit for the user's plan name."""
 
     plan = str(user.get("plan") or DEFAULT_CLIENT_PLAN).strip().lower()
-    plan_default = PLAN_DESTINATION_LIMITS.get(plan, DEFAULT_MAX_DESTINATIONS)
+    return PLAN_DESTINATION_LIMITS.get(plan, DEFAULT_MAX_DESTINATIONS)
+
+
+def get_custom_destination_limit(user: dict[str, Any]) -> int:
+    """Return admin/manual override from users.max_destinations (0 = unset)."""
+
     try:
-        stored = int(user.get("max_destinations") or 0)
+        return max(0, int(user.get("max_destinations") or 0))
     except (TypeError, ValueError):
-        stored = 0
-    if stored > plan_default:
-        return stored
-    return plan_default
+        return 0
+
+
+def get_user_destination_limit(user: dict[str, Any]) -> int:
+    """Return effective destination limit: max(plan_limit, custom_limit).
+
+    - plan_limit: default for free/basic/pro/admin
+    - custom_limit: users.max_destinations set by admin
+    - effective_limit: allows admin to raise above the plan without renaming the plan
+    """
+
+    plan_limit = get_plan_destination_limit(user)
+    custom_limit = get_custom_destination_limit(user)
+    if custom_limit > plan_limit:
+        return custom_limit
+    return plan_limit
 
 
 def count_enabled_destinations(user_or_settings: dict[str, Any]) -> int:

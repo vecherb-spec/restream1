@@ -188,6 +188,8 @@ SRS_TRUSTED_IPS = {
     for ip in os.getenv("RESTREAM_SRS_TRUSTED_IPS", "127.0.0.1,::1").split(",")
     if ip.strip()
 }
+AUTH_RATE_LIMIT = max(1, int(os.getenv("RESTREAM_AUTH_RATE_LIMIT", "20")))
+AUTH_RATE_WINDOW_SECONDS = max(1, int(os.getenv("RESTREAM_AUTH_RATE_WINDOW_SECONDS", "60")))
 
 active_processes: dict[str, dict[str, Any]] = {}
 active_publishers: dict[str, dict[str, Any]] = {}
@@ -195,6 +197,8 @@ recent_processes: list[dict[str, Any]] = []
 ffmpeg_restart_counts: dict[str, int] = {}
 ffmpeg_worker_generations: dict[str, int] = {}
 process_lock = threading.Lock()
+auth_rate_lock = threading.Lock()
+auth_rate_buckets: dict[str, list[float]] = {}
 
 
 class LoginPayload(BaseModel):
@@ -340,6 +344,26 @@ def get_request_client_ip(request: Request) -> str:
 
     # Client-controlled X-Forwarded-For must not authorize SRS webhooks.
     return request.client.host if request.client else ""
+
+
+def enforce_auth_rate_limit(request: Request) -> None:
+    """Basic in-memory rate limit for public auth endpoints."""
+
+    client_ip = get_request_client_ip(request) or "unknown"
+    bucket_key = f"{client_ip}:{request.url.path}"
+    now = time.time()
+    window_start = now - AUTH_RATE_WINDOW_SECONDS
+
+    with auth_rate_lock:
+        stamps = [stamp for stamp in auth_rate_buckets.get(bucket_key, []) if stamp >= window_start]
+        if len(stamps) >= AUTH_RATE_LIMIT:
+            auth_rate_buckets[bucket_key] = stamps
+            raise HTTPException(
+                status_code=429,
+                detail="Слишком много попыток. Подождите немного и попробуйте снова.",
+            )
+        stamps.append(now)
+        auth_rate_buckets[bucket_key] = stamps
 
 
 def verify_srs_webhook(request: Request) -> None:
@@ -2039,9 +2063,14 @@ def sync_live_restream_worker(user: dict[str, Any]) -> bool:
 
 
 @app.post("/api/auth/login")
-def api_login(payload: LoginPayload, response: Response) -> dict[str, Any]:
+def api_login(
+    payload: LoginPayload,
+    response: Response,
+    request: Request,
+) -> dict[str, Any]:
     """Authenticate a user for the future web frontend."""
 
+    enforce_auth_rate_limit(request)
     user = authenticate_user(payload.username, payload.password)
     if user is None:
         raise HTTPException(status_code=401, detail="Invalid credentials or blocked account")
@@ -2049,9 +2078,14 @@ def api_login(payload: LoginPayload, response: Response) -> dict[str, Any]:
 
 
 @app.post("/api/auth/register")
-def api_register(payload: RegisterPayload, response: Response) -> dict[str, Any]:
+def api_register(
+    payload: RegisterPayload,
+    response: Response,
+    request: Request,
+) -> dict[str, Any]:
     """Register a client user and return an API session token."""
 
+    enforce_auth_rate_limit(request)
     success, message, user = create_user(payload.username, payload.password, payload.email)
     if not success or user is None:
         raise HTTPException(status_code=400, detail=message)
@@ -2075,9 +2109,10 @@ def api_logout(
 
 
 @app.post("/api/auth/forgot-password")
-def api_forgot_password(payload: ForgotPasswordPayload) -> dict[str, Any]:
+def api_forgot_password(payload: ForgotPasswordPayload, request: Request) -> dict[str, Any]:
     """Request password reset without revealing whether the account exists."""
 
+    enforce_auth_rate_limit(request)
     generic_message = (
         "Если аккаунт существует и для него настроен email, "
         "мы отправили инструкции по восстановлению пароля."
@@ -2095,9 +2130,10 @@ def api_forgot_password(payload: ForgotPasswordPayload) -> dict[str, Any]:
 
 
 @app.post("/api/auth/reset-password")
-def api_reset_password(payload: PasswordResetPayload) -> dict[str, Any]:
+def api_reset_password(payload: PasswordResetPayload, request: Request) -> dict[str, Any]:
     """Reset password using a valid email reset token."""
 
+    enforce_auth_rate_limit(request)
     success, message = reset_password_with_token(payload.token, payload.new_password)
     if not success:
         raise HTTPException(status_code=400, detail=message)
