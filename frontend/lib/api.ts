@@ -144,6 +144,8 @@ export type AdminLiveDashboard = {
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") || "";
 
+const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+
 export const OBS_SERVER_URL =
   process.env.NEXT_PUBLIC_OBS_SERVER_URL || "rtmp://restream.medialive.ru/live";
 
@@ -151,10 +153,37 @@ export const HLS_BASE_URL =
   process.env.NEXT_PUBLIC_HLS_BASE_URL?.replace(/\/$/, "") ||
   "https://restream.medialive.ru/srs/live";
 
+function formatApiErrorDetail(detail: unknown, fallback: string): string {
+  if (typeof detail === "string" && detail.trim()) {
+    return detail;
+  }
+  if (Array.isArray(detail)) {
+    const parts = detail
+      .map((item) => {
+        if (typeof item === "string") {
+          return item;
+        }
+        if (item && typeof item === "object" && "msg" in item) {
+          return String((item as { msg: unknown }).msg);
+        }
+        return "";
+      })
+      .filter(Boolean);
+    if (parts.length) {
+      return parts.join("; ");
+    }
+  }
+  if (detail && typeof detail === "object" && "message" in detail) {
+    return String((detail as { message: unknown }).message);
+  }
+  return fallback;
+}
+
 async function request<T>(
   path: string,
   options: RequestInit = {},
   token?: string,
+  timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
 ): Promise<T> {
   const headers = new Headers(options.headers);
   headers.set("Content-Type", "application/json");
@@ -162,26 +191,52 @@ async function request<T>(
     headers.set("Authorization", `Bearer ${token}`);
   }
 
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    ...options,
-    headers,
-    credentials: "include",
-  });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    if (response.status === 404 && path.includes("/auth/forgot-password")) {
-      throw new Error(
-        "Сервис восстановления пароля не обновлён на сервере. Нужно обновить backend.",
-      );
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  if (options.signal) {
+    if (options.signal.aborted) {
+      controller.abort();
+    } else {
+      options.signal.addEventListener("abort", () => controller.abort(), { once: true });
     }
-    if (response.status === 404 && path.includes("/auth/reset-password")) {
-      throw new Error(
-        "Сервис сброса пароля не обновлён на сервере. Нужно обновить backend.",
-      );
-    }
-    throw new Error(payload.detail || payload.message || `HTTP ${response.status}`);
   }
-  return payload as T;
+
+  try {
+    const response = await fetch(`${API_BASE_URL}${path}`, {
+      ...options,
+      headers,
+      credentials: "include",
+      signal: controller.signal,
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      if (response.status === 404 && path.includes("/auth/forgot-password")) {
+        throw new Error(
+          "Сервис восстановления пароля не обновлён на сервере. Нужно обновить backend.",
+        );
+      }
+      if (response.status === 404 && path.includes("/auth/reset-password")) {
+        throw new Error(
+          "Сервис сброса пароля не обновлён на сервере. Нужно обновить backend.",
+        );
+      }
+      throw new Error(
+        formatApiErrorDetail(
+          (payload as { detail?: unknown; message?: unknown }).detail ??
+            (payload as { message?: unknown }).message,
+          `HTTP ${response.status}`,
+        ),
+      );
+    }
+    return payload as T;
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error("Сервер не отвечает. Проверьте интернет или VPN и попробуйте снова.");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 export async function login(username: string, password: string) {

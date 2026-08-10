@@ -1487,9 +1487,12 @@ function AdminDashboard({
 export default function Home() {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const [bootError, setBootError] = useState("");
   const [resetToken, setResetToken] = useState("");
+  const [bootTick, setBootTick] = useState(0);
 
   useEffect(() => {
+    let cancelled = false;
     const params = new URLSearchParams(window.location.search);
     const token = params.get("reset_token") || params.get("token") || "";
     if (token) {
@@ -1501,21 +1504,78 @@ export default function Home() {
       window.history.replaceState({}, "", nextUrl);
     }
 
+    setLoading(true);
+    setBootError("");
     getMe()
       .then((response) => {
-        setUser(response.user);
+        if (!cancelled) {
+          setUser(response.user);
+        }
       })
-      .catch(() => setUser(null))
-      .finally(() => setLoading(false));
-  }, []);
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        setUser(null);
+        const message = error instanceof Error ? error.message : "";
+        // 401/нет сессии — нормальный вход на логин. Таймаут/сеть — показываем ошибку.
+        if (message.includes("не отвечает") || message.includes("Failed to fetch")) {
+          setBootError(message || "Не удалось связаться с API.");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [bootTick]);
 
   function onAuthenticated(nextUser: User) {
     setResetToken("");
+    setBootError("");
     setUser(nextUser);
   }
 
   if (loading) {
-    return <main className="page">Загрузка...</main>;
+    return (
+      <main className="page">
+        <div className="card" style={{ maxWidth: 460, margin: "80px auto" }}>
+          <h1>Restream MediaLive</h1>
+          <p className="muted">Проверяем сессию...</p>
+        </div>
+      </main>
+    );
+  }
+
+  if (bootError) {
+    return (
+      <main className="page">
+        <div className="card" style={{ maxWidth: 460, margin: "80px auto" }}>
+          <h1>Restream MediaLive</h1>
+          <div className="error">{bootError}</div>
+          <p className="muted">
+            Страница открылась, но запрос к API не завершился. Часто помогает VPN или другой DNS
+            (8.8.8.8).
+          </p>
+          <button className="button" type="button" onClick={() => setBootTick((value) => value + 1)}>
+            Повторить
+          </button>
+          <button
+            className="button secondary"
+            type="button"
+            onClick={() => {
+              setBootError("");
+            }}
+          >
+            Перейти ко входу
+          </button>
+        </div>
+      </main>
+    );
   }
 
   // Password-reset links must open the reset form even if a session cookie exists.
