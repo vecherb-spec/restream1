@@ -1541,14 +1541,7 @@ export default function Home() {
   }
 
   if (loading) {
-    return (
-      <main className="page">
-        <div className="card" style={{ maxWidth: 460, margin: "80px auto" }}>
-          <h1>Restream MediaLive</h1>
-          <p className="muted">Проверяем сессию...</p>
-        </div>
-      </main>
-    );
+    return null;
   }
 
   if (bootError) {
