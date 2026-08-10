@@ -3,7 +3,7 @@
 Usage:
     python scripts/migrate_sqlite_to_postgres.py \
         --sqlite /opt/restream/restream.db \
-        --postgres postgresql://restream:change_me@127.0.0.1:5432/restream
+        --postgres postgresql://restream:YOUR_STRONG_PASSWORD@127.0.0.1:5432/restream
 
 The script intentionally does not migrate auth_sessions; users will sign in
 again and receive new web sessions.

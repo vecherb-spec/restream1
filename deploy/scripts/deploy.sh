@@ -30,10 +30,10 @@ fi
 
 pip install -r requirements.txt -q
 mkdir -p "$REPO_DIR/logs" "$REPO_DIR/state" "$REPO_DIR/backups"
-# Keep SRS webhook secret in sync for host installs (Compose renders at container start).
+# Keep SRS webhook secret in sync for host installs. Fail if secret is missing/insecure.
 if [[ -x "$REPO_DIR/deploy/scripts/render_srs_conf.sh" ]]; then
   RESTREAM_SRS_BACKEND_HOOK="${RESTREAM_SRS_BACKEND_HOOK:-127.0.0.1:8000}" \
-    "$REPO_DIR/deploy/scripts/render_srs_conf.sh" || true
+    "$REPO_DIR/deploy/scripts/render_srs_conf.sh"
 fi
 python3 -c "from database import init_db; init_db(); print('Database schema is up to date.')"
 

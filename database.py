@@ -648,12 +648,13 @@ def reset_password_with_token(token: str, new_password: str) -> tuple[bool, str]
 
 
 def create_database_backup() -> dict[str, Any]:
-    """Create a timestamped database backup."""
+    """Create a timestamped consistent database backup."""
 
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     if DATABASE_BACKEND == "postgres":
         backup_path = BACKUP_DIR / f"restream_{timestamp}.sql"
+        # Do not log DATABASE_URL — it may contain credentials.
         subprocess.run(
             ["pg_dump", normalize_database_url(DATABASE_URL), "-f", str(backup_path)],
             check=True,
@@ -662,7 +663,23 @@ def create_database_backup() -> dict[str, Any]:
         )
     else:
         backup_path = BACKUP_DIR / f"restream_{timestamp}.db"
-        shutil.copy2(DATABASE_PATH, backup_path)
+        source = sqlite3.connect(f"file:{DATABASE_PATH}?mode=ro", uri=True)
+        try:
+            destination = sqlite3.connect(backup_path)
+            try:
+                source.backup(destination)
+            finally:
+                destination.close()
+        finally:
+            source.close()
+        checker = sqlite3.connect(backup_path)
+        try:
+            integrity = checker.execute("PRAGMA integrity_check").fetchone()
+        finally:
+            checker.close()
+        if not integrity or str(integrity[0]).lower() != "ok":
+            backup_path.unlink(missing_ok=True)
+            raise RuntimeError(f"SQLite backup failed integrity_check: {integrity}")
     return {
         "path": str(backup_path),
         "filename": backup_path.name,

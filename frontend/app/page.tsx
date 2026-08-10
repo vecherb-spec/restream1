@@ -250,14 +250,6 @@ function AuthCard({
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
-  useEffect(() => {
-    if (!initialResetToken) {
-      return;
-    }
-    setResetToken(initialResetToken);
-    setMode("reset");
-  }, [initialResetToken]);
-
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     setError("");
@@ -1483,19 +1475,25 @@ function AdminDashboard({
   );
 }
 
+function readResetTokenFromWindow(): string {
+  if (typeof window === "undefined") {
+    return "";
+  }
+  const params = new URLSearchParams(window.location.search);
+  return params.get("reset_token") || params.get("token") || "";
+}
+
 export default function Home() {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   const [bootError, setBootError] = useState("");
-  const [resetToken, setResetToken] = useState("");
+  const [resetToken, setResetToken] = useState(readResetTokenFromWindow);
   const [bootTick, setBootTick] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
     const params = new URLSearchParams(window.location.search);
-    const token = params.get("reset_token") || params.get("token") || "";
-    if (token) {
-      setResetToken(token);
+    if (params.has("reset_token") || params.has("token")) {
       params.delete("reset_token");
       params.delete("token");
       const nextQuery = params.toString();
@@ -1503,8 +1501,6 @@ export default function Home() {
       window.history.replaceState({}, "", nextUrl);
     }
 
-    setLoading(true);
-    setBootError("");
     getMe()
       .then((response) => {
         if (!cancelled) {

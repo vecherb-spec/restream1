@@ -1,11 +1,16 @@
 """FastAPI backend for SRS webhooks and FFmpeg restream workers.
 
-Run locally:
-    uvicorn main:app --host 0.0.0.0 --port 8000
+Run locally (bind loopback in production; put nginx in front):
+    uvicorn main:app --host 127.0.0.1 --port 8000
 
-SRS should call:
-    POST http://127.0.0.1:8000/on_publish?token=YOUR_SRS_WEBHOOK_SECRET
-    POST http://127.0.0.1:8000/on_unpublish?token=YOUR_SRS_WEBHOOK_SECRET
+SRS http_hooks cannot set custom headers, so the shared secret is passed as
+a query token when rendering deploy/srs/srs.conf from the template:
+
+    POST http://127.0.0.1:8000/on_publish?token=<RESTREAM_SRS_WEBHOOK_SECRET>
+    POST http://127.0.0.1:8000/on_unpublish?token=<RESTREAM_SRS_WEBHOOK_SECRET>
+
+Optional reverse-proxy deployments may instead inject
+X-Restream-Webhook-Secret and omit the query token.
 """
 
 from __future__ import annotations
@@ -115,7 +120,9 @@ app.add_middleware(
 
 @app.on_event("startup")
 def on_startup() -> None:
-    """Ensure schema migrations run and recover orphan FFmpeg workers."""
+    """Validate secrets, run schema migrations, and recover orphan FFmpeg workers."""
+
+    validate_runtime_secrets()
 
     try:
         init_db()
@@ -158,12 +165,19 @@ SRS_INPUT_URL_TEMPLATE = os.getenv(
 FFMPEG_BIN = os.getenv("FFMPEG_BIN", "ffmpeg")
 FFPROBE_BIN = os.getenv("FFPROBE_BIN", "ffprobe")
 FFMPEG_MAX_RESTARTS = max(0, int(os.getenv("RESTREAM_FFMPEG_MAX_RESTARTS", "5")))
-FFMPEG_RESTART_DELAY_SECONDS = max(0.0, float(os.getenv("RESTREAM_FFMPEG_RESTART_DELAY_SECONDS", "3")))
+FFMPEG_RESTART_WINDOW_SECONDS = max(30.0, float(os.getenv("RESTREAM_FFMPEG_RESTART_WINDOW_SECONDS", "300")))
+FFMPEG_RESTART_BACKOFF_BASE_SECONDS = max(1.0, float(os.getenv("RESTREAM_FFMPEG_RESTART_BACKOFF_BASE_SECONDS", "2")))
+FFMPEG_RESTART_BACKOFF_MAX_SECONDS = max(1.0, float(os.getenv("RESTREAM_FFMPEG_RESTART_BACKOFF_MAX_SECONDS", "60")))
+FFMPEG_STABLE_RESET_SECONDS = max(10.0, float(os.getenv("RESTREAM_FFMPEG_STABLE_RESET_SECONDS", "60")))
+# Legacy fixed delay kept as minimum sleep floor.
+FFMPEG_RESTART_DELAY_SECONDS = max(0.0, float(os.getenv("RESTREAM_FFMPEG_RESTART_DELAY_SECONDS", "2")))
 # Network IO timeout for RTMP read/write (microseconds). Default: 15s.
 FFMPEG_RW_TIMEOUT_US = max(1_000_000, int(os.getenv("RESTREAM_FFMPEG_RW_TIMEOUT_US", "15000000")))
-# Kill FFmpeg if -progress stops advancing. 0 disables stall watchdog.
-FFMPEG_STALL_TIMEOUT_SECONDS = max(0.0, float(os.getenv("RESTREAM_FFMPEG_STALL_TIMEOUT_SECONDS", "45")))
-FFMPEG_STALL_GRACE_SECONDS = max(0.0, float(os.getenv("RESTREAM_FFMPEG_STALL_GRACE_SECONDS", "30")))
+# Kill FFmpeg only after prolonged frozen progress. 0 disables stall watchdog.
+FFMPEG_STALL_TIMEOUT_SECONDS = max(0.0, float(os.getenv("RESTREAM_FFMPEG_STALL_TIMEOUT_SECONDS", "120")))
+FFMPEG_STALL_GRACE_SECONDS = max(0.0, float(os.getenv("RESTREAM_FFMPEG_STALL_GRACE_SECONDS", "60")))
+FFMPEG_STALL_POLL_SECONDS = max(1.0, float(os.getenv("RESTREAM_FFMPEG_STALL_POLL_SECONDS", "5")))
+FFMPEG_STALL_MIN_SAMPLES = max(2, int(os.getenv("RESTREAM_FFMPEG_STALL_MIN_SAMPLES", "3")))
 # adopt = keep orphan workers and reattach monitors; kill = terminate orphans on boot
 FFMPEG_ORPHAN_POLICY = os.getenv("RESTREAM_FFMPEG_ORPHAN_POLICY", "adopt").strip().lower()
 LOG_DIR = Path(os.getenv("RESTREAM_LOG_DIR", "logs"))
@@ -188,17 +202,41 @@ SRS_TRUSTED_IPS = {
     for ip in os.getenv("RESTREAM_SRS_TRUSTED_IPS", "127.0.0.1,::1").split(",")
     if ip.strip()
 }
+AUTH_TRUSTED_PROXIES = {
+    ip.strip()
+    for ip in os.getenv("RESTREAM_AUTH_TRUSTED_PROXIES", "127.0.0.1,::1").split(",")
+    if ip.strip()
+}
 AUTH_RATE_LIMIT = max(1, int(os.getenv("RESTREAM_AUTH_RATE_LIMIT", "20")))
 AUTH_RATE_WINDOW_SECONDS = max(1, int(os.getenv("RESTREAM_AUTH_RATE_WINDOW_SECONDS", "60")))
+ALLOW_INSECURE_DEFAULTS = os.getenv("RESTREAM_ALLOW_INSECURE_DEFAULTS", "false").lower() == "true"
+FORBIDDEN_SECRET_MARKERS = ("change_me", "changeme", "password", "secret123")
 
 active_processes: dict[str, dict[str, Any]] = {}
 active_publishers: dict[str, dict[str, Any]] = {}
 recent_processes: list[dict[str, Any]] = []
-ffmpeg_restart_counts: dict[str, int] = {}
+ffmpeg_restart_events: dict[str, list[float]] = {}
 ffmpeg_worker_generations: dict[str, int] = {}
 process_lock = threading.Lock()
 auth_rate_lock = threading.Lock()
 auth_rate_buckets: dict[str, list[float]] = {}
+
+
+def validate_runtime_secrets() -> None:
+    """Fail startup when required production secrets are missing or weak."""
+
+    secret = SRS_WEBHOOK_SECRET
+    weak = (not secret) or any(marker in secret.lower() for marker in FORBIDDEN_SECRET_MARKERS)
+    if weak:
+        message = (
+            "RESTREAM_SRS_WEBHOOK_SECRET is missing or uses an insecure default. "
+            "Set a strong unique secret shared with SRS (render via deploy/scripts/render_srs_conf.sh). "
+            "For local development only, set RESTREAM_ALLOW_INSECURE_DEFAULTS=true."
+        )
+        if ALLOW_INSECURE_DEFAULTS:
+            logger.warning(message)
+            return
+        raise RuntimeError(message)
 
 
 class LoginPayload(BaseModel):
@@ -285,12 +323,15 @@ def set_session_cookie(response: Response, token: str) -> None:
 
 
 def clear_session_cookie(response: Response) -> None:
-    """Clear the browser session cookie."""
+    """Clear the browser session cookie using the same attributes as set."""
 
     response.delete_cookie(
         key=COOKIE_NAME,
         domain=COOKIE_DOMAIN,
         path="/",
+        secure=COOKIE_SECURE,
+        httponly=True,
+        samesite="lax",
     )
 
 
@@ -340,16 +381,26 @@ def get_current_admin(user: dict[str, Any] = Depends(get_current_api_user)) -> d
 
 
 def get_request_client_ip(request: Request) -> str:
-    """Return the direct peer IP for webhook auth (never trust X-Forwarded-For)."""
+    """Return the direct peer IP (never trust X-Forwarded-For for webhook auth)."""
 
-    # Client-controlled X-Forwarded-For must not authorize SRS webhooks.
     return request.client.host if request.client else ""
+
+
+def get_auth_client_ip(request: Request) -> str:
+    """Return client IP for auth rate limits; trust XFF only from local proxies."""
+
+    peer = get_request_client_ip(request)
+    if peer in AUTH_TRUSTED_PROXIES:
+        forwarded = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+        if forwarded:
+            return forwarded
+    return peer or "unknown"
 
 
 def enforce_auth_rate_limit(request: Request) -> None:
     """Basic in-memory rate limit for public auth endpoints."""
 
-    client_ip = get_request_client_ip(request) or "unknown"
+    client_ip = get_auth_client_ip(request)
     bucket_key = f"{client_ip}:{request.url.path}"
     now = time.time()
     window_start = now - AUTH_RATE_WINDOW_SECONDS
@@ -367,21 +418,22 @@ def enforce_auth_rate_limit(request: Request) -> None:
 
 
 def verify_srs_webhook(request: Request) -> None:
-    """Allow SRS hooks only from trusted direct peers or with a shared secret."""
+    """Require SRS webhook secret on every request (trusted IP is never a bypass)."""
 
     client_ip = get_request_client_ip(request)
-    if client_ip in SRS_TRUSTED_IPS:
-        return
+    if not SRS_WEBHOOK_SECRET:
+        logger.error("Rejected SRS webhook: RESTREAM_SRS_WEBHOOK_SECRET is not configured")
+        raise HTTPException(status_code=503, detail="SRS webhook secret is not configured")
 
-    if SRS_WEBHOOK_SECRET:
-        provided = request.headers.get("X-Restream-Webhook-Secret", "")
-        if not provided:
-            provided = request.query_params.get("token", "")
-        if provided and secrets.compare_digest(provided, SRS_WEBHOOK_SECRET):
-            return
+    provided = request.headers.get("X-Restream-Webhook-Secret", "")
+    if not provided:
+        provided = request.query_params.get("token", "")
+    if not provided or not secrets.compare_digest(provided, SRS_WEBHOOK_SECRET):
+        logger.warning("Rejected SRS webhook from %s: invalid secret", client_ip)
+        raise HTTPException(status_code=403, detail="SRS webhook is not allowed")
 
-    logger.warning("Rejected SRS webhook from %s", client_ip)
-    raise HTTPException(status_code=403, detail="SRS webhook is not allowed")
+    if SRS_TRUSTED_IPS and client_ip not in SRS_TRUSTED_IPS:
+        logger.info("Accepted SRS webhook by secret from non-listed IP %s", client_ip)
 
 
 def model_to_dict(model: BaseModel, exclude_unset: bool = False) -> dict[str, Any]:
@@ -593,6 +645,27 @@ def find_latest_log_path_for_stream(stream_key: str) -> Path | None:
         return None
 
 
+def find_latest_log_path_for_worker(stream_key: str, platform_id: str) -> Path | None:
+    """Find the newest FFmpeg log for one stream_key + destination platform."""
+
+    safe_key = safe_log_name(stream_key)
+    safe_platform = safe_log_name(platform_id)
+    if not LOG_DIR.exists() or not LOG_DIR.is_dir():
+        return None
+
+    candidates = [
+        path
+        for path in LOG_DIR.glob(f"ffmpeg_{safe_key}_{safe_platform}_*.log")
+        if path.is_file() and not path.name.endswith(".progress")
+    ]
+    if not candidates:
+        return None
+    try:
+        return max(candidates, key=lambda path: path.stat().st_mtime)
+    except OSError:
+        return None
+
+
 def find_latest_log_path_for_username(username: str) -> Path | None:
     """Find the newest FFmpeg log for stream keys belonging to this username only."""
 
@@ -603,9 +676,11 @@ def find_latest_log_path_for_username(username: str) -> Path | None:
     if not LOG_DIR.exists() or not LOG_DIR.is_dir():
         return None
 
-    # Require live_{username}_{12hex}_{timestamp}.log so "a" cannot match "alice".
+    # Match live_{username}_{12hex}_{platform}_{timestamp}.log (and legacy without platform).
+    # Require the username segment so "a" cannot match "alice".
     name_re = re.compile(
-        rf"^ffmpeg_live_{re.escape(safe_username)}_[a-f0-9]{{12}}_\d{{8}}_\d{{6}}\.log$"
+        rf"^ffmpeg_live_{re.escape(safe_username)}_[a-f0-9]{{12}}"
+        rf"(?:_[a-z0-9]+)?_\d{{8}}_\d{{6}}\.log$"
     )
     candidates = [
         path
@@ -1435,10 +1510,20 @@ def adopt_ffmpeg_worker(worker: dict[str, Any]) -> bool:
     if process.poll() is not None:
         return False
 
-    log_path = find_latest_log_path_for_stream(stream_key) or log_path_for_stream(stream_key)
-    progress_path = worker.get("progress_path") or progress_path_for_log(log_path)
+    if worker.get("log_path"):
+        log_path = Path(str(worker["log_path"]))
+    else:
+        log_path = find_latest_log_path_for_worker(stream_key, platform_id) or log_path_for_worker(
+            stream_key,
+            platform_id,
+        )
+    if worker.get("progress_path"):
+        progress_path = Path(str(worker["progress_path"]))
+    else:
+        progress_path = progress_path_for_log(log_path)
     destinations = int(worker.get("destinations") or 0)
     published_at = utc_now_iso()
+    generation = bump_ffmpeg_generation(worker_key)
 
     with process_lock:
         active_processes[worker_key] = {
@@ -1452,6 +1537,7 @@ def adopt_ffmpeg_worker(worker: dict[str, Any]) -> bool:
             "log_path": log_path,
             "progress_path": progress_path,
             "resolution": "",
+            "generation": generation,
             "adopted": True,
         }
         publisher = active_publishers.setdefault(
@@ -1620,23 +1706,6 @@ def bump_ffmpeg_generation(worker_key: str) -> int:
         return next_generation
 
 
-def bump_stream_generations(stream_key: str) -> None:
-    """Invalidate in-flight starts for all known workers belonging to a stream."""
-
-    with process_lock:
-        worker_keys = {
-            worker_key
-            for worker_key in active_processes
-            if worker_key_matches_stream(worker_key, stream_key)
-        }
-        worker_keys.update(
-            worker_key_for(stream_key, str(config["id"]))
-            for config in PLATFORM_STATUS_CONFIGS
-        )
-        for worker_key in worker_keys:
-            ffmpeg_worker_generations[worker_key] = ffmpeg_worker_generations.get(worker_key, 0) + 1
-
-
 def srs_input_seems_live(stream_key: str) -> bool:
     """Probe whether SRS still has a publishable input for this stream key."""
 
@@ -1705,20 +1774,28 @@ def stop_worker(
         recent_processes.insert(0, snapshot)
         del recent_processes[50:]
     if clear_restart_state:
-        ffmpeg_restart_counts.pop(worker_key, None)
+        with process_lock:
+            ffmpeg_restart_events.pop(worker_key, None)
     return True
 
 
 def stop_process(stream_key: str, *, clear_restart_state: bool = False) -> bool:
     """Terminate all running FFmpeg workers for a stream key."""
 
-    bump_stream_generations(stream_key)
     with process_lock:
         worker_keys = [
             worker_key
             for worker_key in active_processes
             if worker_key_matches_stream(worker_key, stream_key)
         ]
+        inactive_keys = [
+            worker_key_for(stream_key, str(config["id"]))
+            for config in PLATFORM_STATUS_CONFIGS
+            if worker_key_for(stream_key, str(config["id"])) not in worker_keys
+        ]
+    # Single invalidation path: bump_ffmpeg_generation / stop_worker only.
+    for worker_key in inactive_keys:
+        bump_ffmpeg_generation(worker_key)
     stopped = False
     for worker_key in worker_keys:
         stopped = stop_worker(
@@ -1737,11 +1814,63 @@ def clear_ffmpeg_restart_state(stream_key: str) -> None:
     with process_lock:
         keys = [
             worker_key
-            for worker_key in ffmpeg_restart_counts
+            for worker_key in ffmpeg_restart_events
             if worker_key_matches_stream(worker_key, stream_key)
         ]
         for worker_key in keys:
-            ffmpeg_restart_counts.pop(worker_key, None)
+            ffmpeg_restart_events.pop(worker_key, None)
+
+
+def next_restart_delay_seconds(worker_key: str, *, consume: bool = True) -> float | None:
+    """Return backoff delay or None when rolling restart budget is exhausted.
+
+    When consume=True, records the restart attempt in the rolling window.
+    Call with consume=False to preview budget without burning an attempt.
+    """
+
+    now = time.time()
+    window_start = now - FFMPEG_RESTART_WINDOW_SECONDS
+    with process_lock:
+        events = [stamp for stamp in ffmpeg_restart_events.get(worker_key, []) if stamp >= window_start]
+        if FFMPEG_MAX_RESTARTS > 0 and len(events) >= FFMPEG_MAX_RESTARTS:
+            ffmpeg_restart_events[worker_key] = events
+            return None
+        attempt = len(events) + 1
+        if consume:
+            events.append(now)
+            ffmpeg_restart_events[worker_key] = events
+        else:
+            ffmpeg_restart_events[worker_key] = events
+    # 2, 4, 8, 16, 32 ... capped by MAX (default base=2).
+    delay = min(
+        FFMPEG_RESTART_BACKOFF_MAX_SECONDS,
+        FFMPEG_RESTART_BACKOFF_BASE_SECONDS * (2 ** max(0, attempt - 1)),
+    )
+    return max(delay, FFMPEG_RESTART_DELAY_SECONDS)
+
+
+def mark_worker_stable_if_needed(worker_key: str) -> None:
+    """Clear rolling restart history after a stable healthy period."""
+
+    with process_lock:
+        entry = active_processes.get(worker_key)
+        if not entry:
+            return
+        started_at = str(entry.get("started_at") or "")
+        process = entry.get("process")
+        if process is None or process.poll() is not None:
+            return
+    try:
+        started = datetime.fromisoformat(started_at)
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - started).total_seconds()
+    except ValueError:
+        return
+    if age < FFMPEG_STABLE_RESET_SECONDS:
+        return
+    with process_lock:
+        ffmpeg_restart_events.pop(worker_key, None)
 
 
 def maybe_restart_ffmpeg(worker_key: str, return_code: int) -> None:
@@ -1753,17 +1882,19 @@ def maybe_restart_ffmpeg(worker_key: str, return_code: int) -> None:
     stream_key, platform_id = split_worker_key(worker_key)
     with process_lock:
         still_published = stream_key in active_publishers
-        restart_count = ffmpeg_restart_counts.get(worker_key, 0)
         generation_before_sleep = ffmpeg_worker_generations.get(worker_key, 0)
 
     if not still_published:
         return
 
-    if restart_count >= FFMPEG_MAX_RESTARTS:
+    # Preview budget first so aborted restarts do not burn the rolling window.
+    delay = next_restart_delay_seconds(worker_key, consume=False)
+    if delay is None:
         logger.error(
-            "FFmpeg worker %s crashed %s times; auto-restart limit reached",
+            "FFmpeg worker %s exceeded %s restarts in %ss; temporarily disabled",
             worker_key,
-            restart_count,
+            FFMPEG_MAX_RESTARTS,
+            int(FFMPEG_RESTART_WINDOW_SECONDS),
         )
         return
 
@@ -1785,9 +1916,8 @@ def maybe_restart_ffmpeg(worker_key: str, return_code: int) -> None:
     if destination is None:
         return
 
-    ffmpeg_restart_counts[worker_key] = restart_count + 1
-    if FFMPEG_RESTART_DELAY_SECONDS:
-        time.sleep(FFMPEG_RESTART_DELAY_SECONDS)
+    if delay:
+        time.sleep(delay)
 
     with process_lock:
         if stream_key not in active_publishers:
@@ -1799,12 +1929,15 @@ def maybe_restart_ffmpeg(worker_key: str, return_code: int) -> None:
             # A newer healthy worker already replaced the crashed one.
             return
 
+    # Consume budget only when we are about to start a replacement worker.
+    if next_restart_delay_seconds(worker_key, consume=True) is None:
+        return
+
     logger.warning(
-        "Restarting FFmpeg worker %s after exit code %s (attempt %s/%s)",
+        "Restarting FFmpeg worker %s after exit code %s (backoff %.1fs)",
         worker_key,
         return_code,
-        restart_count + 1,
-        FFMPEG_MAX_RESTARTS,
+        delay,
     )
     try:
         start_ffmpeg_worker(stream_key, destination)
@@ -1841,7 +1974,7 @@ def watch_ffmpeg_stall(
     process: Any,
     progress_path: Path,
 ) -> None:
-    """Kill FFmpeg when -progress stops advancing for too long."""
+    """Conservatively kill FFmpeg only after prolonged frozen muxer progress."""
 
     if FFMPEG_STALL_TIMEOUT_SECONDS <= 0:
         return
@@ -1851,12 +1984,19 @@ def watch_ffmpeg_stall(
 
     last_marker = ""
     last_change = time.monotonic()
+    frozen_samples = 0
+    saw_progress = False
     stream_key, _platform_id = split_worker_key(worker_key)
 
     while process.poll() is None:
+        mark_worker_stable_if_needed(worker_key)
         with process_lock:
             current = active_processes.get(worker_key)
-            still_ours = bool(current and current.get("process") is process)
+            still_ours = bool(
+                current
+                and current.get("process") is process
+                and current.get("generation") == ffmpeg_worker_generations.get(worker_key)
+            )
             still_published = stream_key in active_publishers
         if not still_ours or not still_published:
             return
@@ -1865,9 +2005,10 @@ def watch_ffmpeg_stall(
         try:
             if progress_path.is_file():
                 metrics = parse_ffmpeg_progress(progress_path)
-                marker = str(metrics.get("out_time_ms") or metrics.get("frame") or "")
-                if not marker:
-                    marker = str(progress_path.stat().st_mtime_ns)
+                # Prefer muxer timeline; frame alone may pause during still scenes.
+                marker = str(metrics.get("out_time_ms") or "")
+                if marker and marker != "0":
+                    saw_progress = True
         except OSError:
             marker = ""
 
@@ -1875,19 +2016,26 @@ def watch_ffmpeg_stall(
         if marker and marker != last_marker:
             last_marker = marker
             last_change = now
-        elif now - last_change >= FFMPEG_STALL_TIMEOUT_SECONDS:
-            logger.error(
-                "FFmpeg worker %s stalled for %ss (no progress); killing hung process",
-                worker_key,
-                int(FFMPEG_STALL_TIMEOUT_SECONDS),
-            )
-            try:
-                process.kill()
-            except OSError:
-                logger.exception("Failed to kill stalled FFmpeg worker %s", worker_key)
-            return
+            frozen_samples = 0
+        elif saw_progress:
+            frozen_samples += 1
+            if (
+                frozen_samples >= FFMPEG_STALL_MIN_SAMPLES
+                and now - last_change >= FFMPEG_STALL_TIMEOUT_SECONDS
+            ):
+                logger.error(
+                    "FFmpeg worker %s complete hang suspected: process alive but out_time_ms frozen "
+                    "for %ss after progress was observed; killing worker",
+                    worker_key,
+                    int(FFMPEG_STALL_TIMEOUT_SECONDS),
+                )
+                try:
+                    process.kill()
+                except OSError:
+                    logger.exception("Failed to kill stalled FFmpeg worker %s", worker_key)
+                return
 
-        time.sleep(5)
+        time.sleep(FFMPEG_STALL_POLL_SECONDS)
 
 
 def normalize_destination_specs(destinations: list[Any]) -> list[dict[str, str]]:
@@ -1909,13 +2057,26 @@ def normalize_destination_specs(destinations: list[Any]) -> list[dict[str, str]]
     return specs
 
 
+def redact_rtmp_url(url: str) -> str:
+    """Mask stream-key tail of an RTMP URL for safe logging."""
+
+    if "://" not in url:
+        return "[REDACTED]"
+    scheme, rest = url.split("://", 1)
+    parts = rest.rstrip("/").split("/")
+    if len(parts) >= 2:
+        parts[-1] = "*******"
+    return f"{scheme}://{'/'.join(parts)}"
+
+
 def redacted_ffmpeg_command(command: list[str]) -> list[str]:
     """Redact destination RTMP URLs before logging command lines."""
 
     redacted_command = command[:]
     for index, value in enumerate(redacted_command):
-        if value.startswith(("rtmp://", "rtmps://")) and index > 0:
-            redacted_command[index] = "[RTMP_OUTPUT_REDACTED]"
+        if value.startswith(("rtmp://", "rtmps://")):
+            # Keep input host visible enough for ops, but always mask key tails.
+            redacted_command[index] = redact_rtmp_url(value)
     return redacted_command
 
 
@@ -1925,8 +2086,21 @@ def start_ffmpeg_worker(stream_key: str, destination: dict[str, str]) -> bool:
     platform_id = str(destination["id"])
     destination_url = str(destination["url"])
     worker_key = worker_key_for(stream_key, platform_id)
+
+    with process_lock:
+        if stream_key not in active_publishers:
+            logger.info("Skip FFmpeg start for %s: publisher is not active", worker_key)
+            return False
+
     stop_worker(worker_key)
     generation = bump_ffmpeg_generation(worker_key)
+
+    with process_lock:
+        if stream_key not in active_publishers:
+            logger.info("Abort FFmpeg start for %s after unpublish", worker_key)
+            return False
+        if ffmpeg_worker_generations.get(worker_key) != generation:
+            return False
 
     input_url = SRS_INPUT_URL_TEMPLATE.format(stream_key=stream_key)
     log_path = log_path_for_worker(stream_key, platform_id)
@@ -1964,8 +2138,15 @@ def start_ffmpeg_worker(stream_key: str, destination: dict[str, str]) -> bool:
         )
 
     with process_lock:
-        if ffmpeg_worker_generations.get(worker_key) != generation:
-            logger.warning("Discarding superseded FFmpeg worker start for %s pid=%s", worker_key, process.pid)
+        if (
+            ffmpeg_worker_generations.get(worker_key) != generation
+            or stream_key not in active_publishers
+        ):
+            logger.warning(
+                "Discarding superseded/unpublished FFmpeg worker start for %s pid=%s",
+                worker_key,
+                process.pid,
+            )
             try:
                 process.kill()
             except OSError:
@@ -1976,6 +2157,7 @@ def start_ffmpeg_worker(stream_key: str, destination: dict[str, str]) -> bool:
             "stream_key": stream_key,
             "platform_id": platform_id,
             "platform_title": destination.get("title") or platform_title(platform_id),
+            "destination_url": destination_url,
             "process": process,
             "started_at": utc_now_iso(),
             "destinations": 1,
@@ -2001,12 +2183,21 @@ def start_ffmpeg(stream_key: str, destinations: list[Any]) -> bool:
         logger.info("Stream %s accepted without restream destinations", stream_key)
         return False
 
+    with process_lock:
+        if stream_key not in active_publishers:
+            logger.info("Skip start_ffmpeg for %s: publisher is not active", stream_key)
+            return False
+
     # SRS may retry callbacks; ensure one fresh worker exists per destination.
     stop_process(stream_key)
 
     started_count = 0
     errors: list[str] = []
     for destination in destination_specs:
+        with process_lock:
+            if stream_key not in active_publishers:
+                logger.info("Abort remaining FFmpeg starts for %s after unpublish", stream_key)
+                break
         try:
             if start_ffmpeg_worker(stream_key, destination):
                 started_count += 1
@@ -2034,7 +2225,7 @@ def start_ffmpeg(stream_key: str, destinations: list[Any]) -> bool:
 
 
 def sync_live_restream_worker(user: dict[str, Any]) -> bool:
-    """Apply updated destination settings to a currently published stream."""
+    """Apply destination changes without restarting healthy unchanged workers."""
 
     stream_key = str(user.get("stream_key") or "")
     if not stream_key:
@@ -2047,17 +2238,62 @@ def sync_live_restream_worker(user: dict[str, Any]) -> bool:
         return False
 
     destinations = get_enabled_destination_specs(user)
-    if destinations:
-        started = start_ffmpeg(stream_key, destinations)
-    else:
-        stop_process(stream_key)
-        started = False
+    desired_by_id = {str(spec["id"]): spec for spec in destinations}
+
+    with process_lock:
+        current_keys = [
+            worker_key
+            for worker_key in list(active_processes)
+            if worker_key_matches_stream(worker_key, stream_key)
+        ]
+
+    for worker_key in current_keys:
+        _, platform_id = split_worker_key(worker_key)
+        desired = desired_by_id.get(platform_id)
+        with process_lock:
+            entry = active_processes.get(worker_key)
+            current_url = str(entry.get("destination_url") or "") if entry else ""
+            process = entry.get("process") if entry else None
+            running = bool(process is not None and process.poll() is None)
+        if desired is None:
+            stop_worker(worker_key, clear_restart_state=True, stopped_by="settings_sync")
+            continue
+        if running and current_url == str(desired["url"]):
+            continue
+        try:
+            start_ffmpeg_worker(stream_key, desired)
+        except Exception:
+            logger.exception("Failed to sync worker %s", worker_key)
+
+    for platform_id, destination in desired_by_id.items():
+        worker_key = worker_key_for(stream_key, platform_id)
+        with process_lock:
+            entry = active_processes.get(worker_key)
+            process = entry.get("process") if entry else None
+            running = bool(process is not None and process.poll() is None)
+        if running:
+            continue
+        try:
+            start_ffmpeg_worker(stream_key, destination)
+        except Exception:
+            logger.exception("Failed to start missing worker %s", worker_key)
 
     with process_lock:
         current_publisher = active_publishers.get(stream_key)
+        running_count = sum(
+            1
+            for worker_key, entry in active_processes.items()
+            if worker_key_matches_stream(worker_key, stream_key)
+            and entry.get("process") is not None
+            and entry["process"].poll() is None
+        )
         if current_publisher is not None:
             current_publisher["destinations"] = len(destinations)
-            current_publisher["ffmpeg_started"] = started
+            current_publisher["ffmpeg_started"] = running_count > 0
+            current_publisher["workers_started"] = running_count
+            started = running_count > 0
+        else:
+            started = False
     persist_publishers_state()
     return started
 
@@ -2113,20 +2349,18 @@ def api_forgot_password(payload: ForgotPasswordPayload, request: Request) -> dic
     """Request password reset without revealing whether the account exists."""
 
     enforce_auth_rate_limit(request)
+    # Always return the same external payload (no email/username oracle).
     generic_message = (
         "Если аккаунт существует и для него настроен email, "
         "мы отправили инструкции по восстановлению пароля."
     )
     user, token = create_password_reset_token(payload.identifier)
-    if user is None or token is None:
-        return {"code": 0, "message": generic_message, "delivery": "none"}
-
-    result = send_password_reset_email(user, token)
-    return {
-        "code": 0,
-        "message": result.get("message") or generic_message,
-        "delivery": result.get("delivery") or "none",
-    }
+    if user is not None and token is not None:
+        try:
+            send_password_reset_email(user, token)
+        except Exception:
+            logger.exception("Password reset email failed")
+    return {"code": 0, "message": generic_message}
 
 
 @app.post("/api/auth/reset-password")
@@ -2444,29 +2678,30 @@ def api_admin_backups(_admin: dict[str, Any] = Depends(get_current_admin)) -> di
 
 @app.post("/api/admin/backups")
 def api_admin_create_backup(_admin: dict[str, Any] = Depends(get_current_admin)) -> dict[str, Any]:
-    """Create a SQLite backup."""
+    """Create a consistent database backup (SQLite backup API or pg_dump)."""
 
     return {"code": 0, "backup": create_database_backup()}
 
 
 @app.get("/health")
-def health() -> dict[str, Any]:
-    """Simple readiness endpoint."""
+def health() -> JSONResponse:
+    """Readiness endpoint used by Docker/systemd health checks."""
 
     db_ok, db_detail = check_database()
     with process_lock:
         active_count = len(active_processes)
-    status = "ok" if db_ok else "degraded"
-    return {
-        "status": status,
+    payload = {
+        "status": "ok" if db_ok else "degraded",
         "active_streams": active_count,
         "database": {
             "ok": db_ok,
             "backend": DATABASE_BACKEND,
             "detail": db_detail,
-            "path": str(DATABASE_PATH),
         },
+        "srs_webhook_configured": bool(SRS_WEBHOOK_SECRET)
+        and not any(marker in SRS_WEBHOOK_SECRET.lower() for marker in FORBIDDEN_SECRET_MARKERS),
     }
+    return JSONResponse(status_code=200 if db_ok else 503, content=payload)
 
 
 @app.post("/on_publish")
@@ -2549,4 +2784,7 @@ async def on_unpublish(request: Request) -> JSONResponse:
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Default to loopback; production should sit behind nginx / Docker port publish.
+    host = os.getenv("RESTREAM_BIND_HOST", "127.0.0.1")
+    port = int(os.getenv("RESTREAM_BIND_PORT", "8000"))
+    uvicorn.run(app, host=host, port=port)
