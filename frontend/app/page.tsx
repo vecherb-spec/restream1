@@ -5,6 +5,9 @@ import { HlsPreview } from "@/components/HlsPreview";
 import {
   AdminLiveDashboard,
   BackupInfo,
+  DestinationPlatformId,
+  DestinationProfile,
+  NotificationSettings,
   OBS_SERVER_URL,
   PlatformStatus,
   RestreamSettings,
@@ -13,8 +16,11 @@ import {
   StreamStatus,
   SystemMetrics,
   User,
+  applyDestinationProfile,
   changeMyPassword,
   createAdminBackup,
+  createDestinationProfile,
+  deleteDestinationProfile,
   getAdminBackups,
   getAdminDashboardEventsUrl,
   getAdminStreamLogs,
@@ -23,8 +29,10 @@ import {
   getAdminUsers,
   getMe,
   getMyStreamLogs,
+  getNotificationSettings,
   getStreamStatus,
   getStreamStatusEventsUrl,
+  listDestinationProfiles,
   login,
   logout,
   register,
@@ -35,11 +43,22 @@ import {
   resetPassword,
   setAdminUserActive,
   stopAdminStream,
+  testTelegramNotification,
   updateAdminUserPlan,
+  updateDestinationProfile,
+  updateNotificationSettings,
   updateSettings,
   updateStreamTitle,
   userToSettings,
 } from "@/lib/api";
+
+const PLATFORM_LABELS: Record<DestinationPlatformId, string> = {
+  yt: "YouTube",
+  vk: "VK",
+  rt: "Rutube",
+  tg: "Telegram",
+  custom: "Custom RTMP",
+};
 
 type AuthMode = "login" | "register" | "forgot" | "reset";
 type ClientView = "broadcast" | "profile";
@@ -445,9 +464,17 @@ function SettingsForm({
   const [error, setError] = useState("");
   const [savingPlatform, setSavingPlatform] = useState<PlatformId | null>(null);
   const [savingCredentials, setSavingCredentials] = useState(false);
+  const [profiles, setProfiles] = useState<DestinationProfile[]>([]);
+  const [applyingProfileId, setApplyingProfileId] = useState<number | null>(null);
   const enabledDestinations = countEnabledDestinations(settings);
   const maxDestinations = getEffectiveMaxDestinations(user);
-  const platformsBusy = savingPlatform !== null || savingCredentials;
+  const platformsBusy = savingPlatform !== null || savingCredentials || applyingProfileId !== null;
+
+  useEffect(() => {
+    listDestinationProfiles()
+      .then((response) => setProfiles(response.profiles))
+      .catch(() => undefined);
+  }, []);
 
   function updateText(key: keyof RestreamSettings, value: string) {
     setSettings((current) => ({ ...current, [key]: value }));
@@ -502,6 +529,29 @@ function SettingsForm({
       setError(requestError instanceof Error ? requestError.message : "Не удалось сохранить настройки");
     } finally {
       setSavingCredentials(false);
+    }
+  }
+
+  async function applyProfileToSlot(platform: PlatformConfig, profileIdValue: string) {
+    if (!profileIdValue) {
+      return;
+    }
+    const profileId = Number(profileIdValue);
+    if (!Number.isFinite(profileId)) {
+      return;
+    }
+    setError("");
+    setMessage("");
+    setApplyingProfileId(profileId);
+    try {
+      const response = await applyDestinationProfile(profileId, false);
+      onSaved(response.user);
+      setSettings(userToSettings(response.user));
+      setMessage(`${platform.title}: профиль применён.`);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Не удалось применить профиль");
+    } finally {
+      setApplyingProfileId(null);
     }
   }
 
@@ -577,6 +627,24 @@ function SettingsForm({
                 </span>
               )}
             </div>
+            <select
+              aria-label={`Профиль ${platform.title}`}
+              disabled={platformsBusy}
+              value=""
+              onChange={(event) => {
+                void applyProfileToSlot(platform, event.target.value);
+                event.currentTarget.value = "";
+              }}
+            >
+              <option value="">Профиль площадки…</option>
+              {profiles
+                .filter((profile) => profile.platform_id === platform.id)
+                .map((profile) => (
+                  <option key={profile.id} value={profile.id}>
+                    {profile.name}
+                  </option>
+                ))}
+            </select>
             <input
               placeholder="RTMP URL"
               value={platform.fixedUrl || (platform.urlKey ? String(settings[platform.urlKey]) : "")}
@@ -928,12 +996,54 @@ function BroadcastMain({
   );
 }
 
-function ClientProfile({ user }: { user: User }) {
+function ClientProfile({
+  user,
+  onUserChange,
+}: {
+  user: User;
+  onUserChange: (user: User) => void;
+}) {
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [profiles, setProfiles] = useState<DestinationProfile[]>([]);
+  const [profilesError, setProfilesError] = useState("");
+  const [profilesMessage, setProfilesMessage] = useState("");
+  const [profilesBusy, setProfilesBusy] = useState(false);
+  const [showAddProfile, setShowAddProfile] = useState(false);
+  const [editingProfileId, setEditingProfileId] = useState<number | null>(null);
+  const [profileName, setProfileName] = useState("");
+  const [profilePlatform, setProfilePlatform] = useState<DestinationPlatformId>("yt");
+  const [profileUrl, setProfileUrl] = useState("");
+  const [profileKey, setProfileKey] = useState("");
+  const [notifySettings, setNotifySettings] = useState<NotificationSettings | null>(null);
+  const [notifyEnabled, setNotifyEnabled] = useState(false);
+  const [notifyChatId, setNotifyChatId] = useState("");
+  const [notifyBusy, setNotifyBusy] = useState(false);
+  const [notifyMessage, setNotifyMessage] = useState("");
+  const [notifyError, setNotifyError] = useState("");
+
+  async function reloadProfiles() {
+    const response = await listDestinationProfiles();
+    setProfiles(response.profiles);
+  }
+
+  useEffect(() => {
+    reloadProfiles().catch((requestError) => {
+      setProfilesError(requestError instanceof Error ? requestError.message : "Не удалось загрузить площадки");
+    });
+    getNotificationSettings()
+      .then((settings) => {
+        setNotifySettings(settings);
+        setNotifyEnabled(Boolean(settings.telegram_enabled));
+        setNotifyChatId(settings.telegram_chat_id_set ? settings.telegram_chat_id_masked || "************" : "");
+      })
+      .catch((requestError) => {
+        setNotifyError(requestError instanceof Error ? requestError.message : "Не удалось загрузить уведомления");
+      });
+  }, []);
 
   async function submitPassword(event: React.FormEvent) {
     event.preventDefault();
@@ -949,6 +1059,132 @@ function ClientProfile({ user }: { user: User }) {
       setError(requestError instanceof Error ? requestError.message : "Не удалось сменить пароль");
     } finally {
       setSaving(false);
+    }
+  }
+
+  function resetProfileForm() {
+    setShowAddProfile(false);
+    setEditingProfileId(null);
+    setProfileName("");
+    setProfilePlatform("yt");
+    setProfileUrl("");
+    setProfileKey("");
+  }
+
+  function startEditProfile(profile: DestinationProfile) {
+    setShowAddProfile(true);
+    setEditingProfileId(profile.id);
+    setProfileName(profile.name);
+    setProfilePlatform(profile.platform_id as DestinationPlatformId);
+    setProfileUrl(profile.base_url || "");
+    setProfileKey(profile.stream_key_masked || "************");
+    setProfilesMessage("");
+    setProfilesError("");
+  }
+
+  async function submitProfile(event: React.FormEvent) {
+    event.preventDefault();
+    setProfilesBusy(true);
+    setProfilesError("");
+    setProfilesMessage("");
+    try {
+      if (editingProfileId != null) {
+        await updateDestinationProfile(editingProfileId, {
+          name: profileName,
+          base_url: profilePlatform === "yt" ? undefined : profileUrl,
+          stream_key: profileKey,
+        });
+        setProfilesMessage("Площадка обновлена.");
+      } else {
+        await createDestinationProfile({
+          name: profileName,
+          platform_id: profilePlatform,
+          base_url: profilePlatform === "yt" ? "" : profileUrl,
+          stream_key: profileKey,
+        });
+        setProfilesMessage("Площадка добавлена.");
+      }
+      await reloadProfiles();
+      resetProfileForm();
+    } catch (requestError) {
+      setProfilesError(requestError instanceof Error ? requestError.message : "Не удалось сохранить площадку");
+    } finally {
+      setProfilesBusy(false);
+    }
+  }
+
+  async function removeProfile(profile: DestinationProfile) {
+    if (!window.confirm(`Удалить площадку «${profile.name}»?`)) {
+      return;
+    }
+    setProfilesBusy(true);
+    setProfilesError("");
+    setProfilesMessage("");
+    try {
+      await deleteDestinationProfile(profile.id);
+      await reloadProfiles();
+      setProfilesMessage("Площадка удалена.");
+      if (editingProfileId === profile.id) {
+        resetProfileForm();
+      }
+    } catch (requestError) {
+      setProfilesError(requestError instanceof Error ? requestError.message : "Не удалось удалить площадку");
+    } finally {
+      setProfilesBusy(false);
+    }
+  }
+
+  async function saveNotifications(event: React.FormEvent) {
+    event.preventDefault();
+    setNotifyBusy(true);
+    setNotifyError("");
+    setNotifyMessage("");
+    try {
+      const payload: { telegram_enabled: boolean; telegram_chat_id?: string } = {
+        telegram_enabled: notifyEnabled,
+      };
+      if (notifyChatId && !/^[*•]+$/.test(notifyChatId)) {
+        payload.telegram_chat_id = notifyChatId;
+      } else if (notifyChatId) {
+        payload.telegram_chat_id = notifyChatId;
+      }
+      const settings = await updateNotificationSettings(payload);
+      setNotifySettings(settings);
+      setNotifyEnabled(Boolean(settings.telegram_enabled));
+      setNotifyChatId(settings.telegram_chat_id_set ? settings.telegram_chat_id_masked || "************" : "");
+      setNotifyMessage(settings.message || "Настройки уведомлений сохранены.");
+      onUserChange({
+        ...user,
+        notify_tg_enabled: settings.telegram_enabled,
+        notify_tg_chat_id_masked: settings.telegram_chat_id_masked,
+        notify_tg_chat_id_set: settings.telegram_chat_id_set,
+        telegram_bot_configured: settings.telegram_bot_configured,
+      });
+    } catch (requestError) {
+      setNotifyError(requestError instanceof Error ? requestError.message : "Не удалось сохранить уведомления");
+    } finally {
+      setNotifyBusy(false);
+    }
+  }
+
+  async function checkTelegram() {
+    setNotifyBusy(true);
+    setNotifyError("");
+    setNotifyMessage("");
+    try {
+      if (notifyChatId && !/^[*•]+$/.test(notifyChatId)) {
+        await updateNotificationSettings({
+          telegram_enabled: notifyEnabled,
+          telegram_chat_id: notifyChatId,
+        });
+      }
+      const settings = await testTelegramNotification();
+      setNotifySettings(settings);
+      setNotifyMessage(settings.message || "Тестовое сообщение отправлено.");
+    } catch (requestError) {
+      setNotifyError(requestError instanceof Error ? requestError.message : "Не удалось проверить Telegram");
+    } finally {
+      setNotifyBusy(false);
     }
   }
 
@@ -979,6 +1215,133 @@ function ClientProfile({ user }: { user: User }) {
           Для изменения тарифа обратитесь к администратору.
         </p>
       </div>
+
+      <div className="card">
+        <div className="client-log-header">
+          <h2>Площадки</h2>
+          <button
+            className="button secondary"
+            type="button"
+            disabled={profilesBusy}
+            onClick={() => {
+              resetProfileForm();
+              setShowAddProfile(true);
+            }}
+          >
+            + Добавить площадку
+          </button>
+        </div>
+        <div className="destination-profile-list">
+          {profiles.length === 0 && <p className="muted">Сохранённых площадок пока нет.</p>}
+          {profiles.map((profile) => (
+            <div className="destination-profile-row" key={profile.id}>
+              <div>
+                <strong>{profile.name}</strong>
+                <small>{PLATFORM_LABELS[profile.platform_id as DestinationPlatformId] || profile.platform_id}</small>
+              </div>
+              <div className="obs-actions">
+                <button className="button secondary" type="button" disabled={profilesBusy} onClick={() => startEditProfile(profile)}>
+                  Изменить
+                </button>
+                <button className="button danger" type="button" disabled={profilesBusy} onClick={() => void removeProfile(profile)}>
+                  Удалить
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+        {showAddProfile && (
+          <form className="form destination-profile-form" onSubmit={submitProfile}>
+            <h3>{editingProfileId != null ? "Изменить площадку" : "Новая площадка"}</h3>
+            <label className="field">
+              Название
+              <input value={profileName} onChange={(event) => setProfileName(event.target.value)} required />
+            </label>
+            <label className="field">
+              Тип
+              <select
+                value={profilePlatform}
+                disabled={editingProfileId != null}
+                onChange={(event) => setProfilePlatform(event.target.value as DestinationPlatformId)}
+              >
+                {(Object.keys(PLATFORM_LABELS) as DestinationPlatformId[]).map((id) => (
+                  <option key={id} value={id}>
+                    {PLATFORM_LABELS[id]}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {profilePlatform !== "yt" && (
+              <label className="field">
+                RTMP / endpoint URL
+                <input
+                  value={profileUrl}
+                  onChange={(event) => setProfileUrl(event.target.value)}
+                  placeholder="rtmp://..."
+                  required
+                />
+              </label>
+            )}
+            <label className="field">
+              Stream key / secret
+              <input
+                type="password"
+                value={profileKey}
+                onChange={(event) => setProfileKey(event.target.value)}
+                placeholder={editingProfileId != null ? "************" : "stream key"}
+                required={editingProfileId == null}
+              />
+            </label>
+            <div className="obs-actions">
+              <button className="button" disabled={profilesBusy}>
+                {profilesBusy ? "Сохранение..." : "Сохранить"}
+              </button>
+              <button className="button secondary" type="button" disabled={profilesBusy} onClick={resetProfileForm}>
+                Отмена
+              </button>
+            </div>
+          </form>
+        )}
+        {profilesError && <div className="error">{profilesError}</div>}
+        {profilesMessage && <div className="alert">{profilesMessage}</div>}
+      </div>
+
+      <form className="card form" onSubmit={saveNotifications}>
+        <h2>Telegram notifications</h2>
+        <label className="toggle-row">
+          <span>Telegram notifications</span>
+          <input
+            type="checkbox"
+            checked={notifyEnabled}
+            onChange={(event) => setNotifyEnabled(event.target.checked)}
+          />
+          <strong>{notifyEnabled ? "ON" : "OFF"}</strong>
+        </label>
+        <label className="field">
+          Telegram Chat ID
+          <input
+            type="password"
+            value={notifyChatId}
+            onChange={(event) => setNotifyChatId(event.target.value)}
+            placeholder="********"
+            autoComplete="off"
+          />
+        </label>
+        <p className="muted">
+          Bot token задаётся только на сервере ({notifySettings?.telegram_bot_configured ? "настроен" : "не настроен"}).
+          Секреты в интерфейсе не показываются.
+        </p>
+        {notifyError && <div className="error">{notifyError}</div>}
+        {notifyMessage && <div className="alert">{notifyMessage}</div>}
+        <div className="obs-actions">
+          <button className="button" disabled={notifyBusy}>
+            {notifyBusy ? "Сохранение..." : "Сохранить уведомления"}
+          </button>
+          <button className="button secondary" type="button" disabled={notifyBusy} onClick={() => void checkTelegram()}>
+            Проверить Telegram
+          </button>
+        </div>
+      </form>
 
       <form className="card form" onSubmit={submitPassword}>
         <h2>Смена пароля</h2>
@@ -1038,7 +1401,7 @@ function Dashboard({
         onLogout={handleLogout}
       />
       {view === "profile" ? (
-        <ClientProfile user={user} />
+        <ClientProfile user={user} onUserChange={onUserChange} />
       ) : (
         <div className="broadcast-layout">
           <BroadcastMain user={user} streamState={streamState} onUserChange={onUserChange} />

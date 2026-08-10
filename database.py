@@ -433,6 +433,31 @@ def init_db() -> None:
         ensure_column(connection, "users", "plan", "TEXT NOT NULL DEFAULT 'free'")
         ensure_column(connection, "users", "max_destinations", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(connection, "users", "stream_title", "TEXT NOT NULL DEFAULT 'Название трансляции'")
+        ensure_column(connection, "users", "notify_tg_enabled", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(connection, "users", "notify_tg_chat_id", "TEXT DEFAULT ''")
+        for platform_id in ("yt", "vk", "rt", "tg", "custom"):
+            ensure_column(connection, "users", f"{platform_id}_profile_id", "INTEGER")
+        connection.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS destination_profiles (
+                id {user_id_definition},
+                user_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                platform_id TEXT NOT NULL,
+                base_url TEXT DEFAULT '',
+                stream_key TEXT DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT {timestamp_default},
+                updated_at TEXT NOT NULL DEFAULT {timestamp_default},
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_destination_profiles_user_id
+            ON destination_profiles(user_id)
+            """
+        )
         connection.execute(
             f"""
             CREATE TABLE IF NOT EXISTS auth_sessions (
@@ -1051,15 +1076,27 @@ def update_restream_settings(user_id: int, settings: dict[str, Any]) -> None:
         "custom_active",
         "custom_url",
         "custom_key",
+        "yt_profile_id",
+        "vk_profile_id",
+        "rt_profile_id",
+        "tg_profile_id",
+        "custom_profile_id",
     }
     payload = {key: settings[key] for key in allowed_fields if key in settings}
     if not payload:
         return
 
-    normalized_payload = {
-        key: (1 if bool(value) else 0) if key.endswith("_active") else str(value).strip()
-        for key, value in payload.items()
-    }
+    normalized_payload: dict[str, Any] = {}
+    for key, value in payload.items():
+        if key.endswith("_active"):
+            normalized_payload[key] = 1 if bool(value) else 0
+        elif key.endswith("_profile_id"):
+            if value in (None, "", 0, "0"):
+                normalized_payload[key] = None
+            else:
+                normalized_payload[key] = int(value)
+        else:
+            normalized_payload[key] = str(value).strip()
     assignments = ", ".join(f"{field} = ?" for field in normalized_payload)
     values = list(normalized_payload.values()) + [user_id]
 
@@ -1142,6 +1179,281 @@ def get_enabled_destination_specs(user: dict[str, Any]) -> list[dict[str, str]]:
             }
         )
     return destinations
+
+
+PROFILE_PLATFORM_IDS = ("yt", "vk", "rt", "tg", "custom")
+YOUTUBE_PROFILE_BASE_URL = YOUTUBE_RTMP_URL
+
+
+def mask_secret_value(value: str | None) -> str:
+    """Return a fixed mask when a secret is present; never echo the secret."""
+
+    if not (value or "").strip():
+        return ""
+    return "************"
+
+
+def public_destination_profile(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Serialize a destination profile without exposing the raw stream key."""
+
+    if row is None:
+        return None
+    return {
+        "id": int(row["id"]),
+        "user_id": int(row["user_id"]),
+        "name": str(row.get("name") or ""),
+        "platform_id": str(row.get("platform_id") or ""),
+        "base_url": str(row.get("base_url") or ""),
+        "has_stream_key": bool(str(row.get("stream_key") or "").strip()),
+        "stream_key_masked": mask_secret_value(str(row.get("stream_key") or "")),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+    }
+
+
+def list_destination_profiles(user_id: int) -> list[dict[str, Any]]:
+    """List destination profiles owned by a user."""
+
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT * FROM destination_profiles
+            WHERE user_id = ?
+            ORDER BY lower(name), id
+            """,
+            (user_id,),
+        ).fetchall()
+    return [public_destination_profile(row_to_dict(row)) for row in rows if row is not None]
+
+
+def get_destination_profile(user_id: int, profile_id: int) -> dict[str, Any] | None:
+    """Fetch one destination profile owned by the user (raw DB row)."""
+
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT * FROM destination_profiles
+            WHERE id = ? AND user_id = ?
+            """,
+            (profile_id, user_id),
+        ).fetchone()
+    return row_to_dict(row)
+
+
+def create_destination_profile(
+    user_id: int,
+    name: str,
+    platform_id: str,
+    base_url: str = "",
+    stream_key: str = "",
+) -> tuple[bool, str, dict[str, Any] | None]:
+    """Create a reusable destination profile for a user."""
+
+    name = (name or "").strip()
+    platform_id = (platform_id or "").strip().lower()
+    base_url = (base_url or "").strip()
+    stream_key = (stream_key or "").strip()
+    if not name:
+        return False, "Название профиля обязательно.", None
+    if platform_id not in PROFILE_PLATFORM_IDS:
+        return False, "Неизвестный тип площадки.", None
+    if platform_id == "yt":
+        base_url = YOUTUBE_PROFILE_BASE_URL
+    elif base_url and not is_allowed_rtmp_base_url(base_url):
+        return False, "URL площадки должен начинаться с rtmp:// или rtmps://.", None
+    if not stream_key:
+        return False, "Stream key обязателен для профиля.", None
+
+    now = utc_now_iso()
+    with get_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO destination_profiles (
+                user_id, name, platform_id, base_url, stream_key, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (user_id, name, platform_id, base_url, stream_key, now, now),
+        )
+        row = connection.execute(
+            """
+            SELECT * FROM destination_profiles
+            WHERE user_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (user_id,),
+        ).fetchone()
+    return True, "Профиль создан.", public_destination_profile(row_to_dict(row))
+
+
+def update_destination_profile(
+    user_id: int,
+    profile_id: int,
+    *,
+    name: str | None = None,
+    base_url: str | None = None,
+    stream_key: str | None = None,
+) -> tuple[bool, str, dict[str, Any] | None]:
+    """Update a profile. Empty/masked stream_key keeps the existing secret."""
+
+    current = get_destination_profile(user_id, profile_id)
+    if current is None:
+        return False, "Профиль не найден.", None
+
+    next_name = (name if name is not None else str(current.get("name") or "")).strip()
+    platform_id = str(current.get("platform_id") or "")
+    if platform_id == "yt":
+        next_url = YOUTUBE_PROFILE_BASE_URL
+    else:
+        next_url = (base_url if base_url is not None else str(current.get("base_url") or "")).strip()
+        if next_url and not is_allowed_rtmp_base_url(next_url):
+            return False, "URL площадки должен начинаться с rtmp:// или rtmps://.", None
+
+    if stream_key is None:
+        next_key = str(current.get("stream_key") or "")
+    else:
+        candidate = stream_key.strip()
+        if not candidate or candidate == mask_secret_value(candidate) or set(candidate) <= {"*", "•"}:
+            next_key = str(current.get("stream_key") or "")
+        else:
+            next_key = candidate
+    if not next_name:
+        return False, "Название профиля обязательно.", None
+    if not next_key:
+        return False, "Stream key обязателен для профиля.", None
+
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE destination_profiles
+            SET name = ?, base_url = ?, stream_key = ?, updated_at = ?
+            WHERE id = ? AND user_id = ?
+            """,
+            (next_name, next_url, next_key, utc_now_iso(), profile_id, user_id),
+        )
+    fresh = get_destination_profile(user_id, profile_id)
+    return True, "Профиль обновлен.", public_destination_profile(fresh)
+
+
+def delete_destination_profile(user_id: int, profile_id: int) -> tuple[bool, str]:
+    """Delete a profile and detach it from active destination slots."""
+
+    current = get_destination_profile(user_id, profile_id)
+    if current is None:
+        return False, "Профиль не найден."
+    platform_id = str(current.get("platform_id") or "")
+    with get_connection() as connection:
+        connection.execute(
+            "DELETE FROM destination_profiles WHERE id = ? AND user_id = ?",
+            (profile_id, user_id),
+        )
+        if platform_id in PROFILE_PLATFORM_IDS:
+            connection.execute(
+                f"UPDATE users SET {platform_id}_profile_id = NULL WHERE id = ? AND {platform_id}_profile_id = ?",
+                (user_id, profile_id),
+            )
+    return True, "Профиль удален."
+
+
+def apply_destination_profile(
+    user_id: int,
+    profile_id: int,
+    *,
+    activate: bool = False,
+) -> tuple[bool, str, dict[str, Any] | None]:
+    """Copy profile credentials into the existing flat destination slot."""
+
+    profile = get_destination_profile(user_id, profile_id)
+    if profile is None:
+        return False, "Профиль не найден.", None
+    platform_id = str(profile.get("platform_id") or "")
+    if platform_id not in PROFILE_PLATFORM_IDS:
+        return False, "Неизвестный тип площадки.", None
+
+    settings: dict[str, Any] = {
+        f"{platform_id}_key": str(profile.get("stream_key") or ""),
+        f"{platform_id}_profile_id": int(profile["id"]),
+    }
+    if platform_id != "yt":
+        settings[f"{platform_id}_url"] = str(profile.get("base_url") or "")
+    if activate:
+        settings[f"{platform_id}_active"] = 1
+
+    # Reuse existing settings updater for key/url/active; profile_id via direct update.
+    update_fields = {
+        key: value
+        for key, value in settings.items()
+        if key.endswith(("_key", "_url", "_active"))
+    }
+    if update_fields:
+        update_restream_settings(user_id, update_fields)
+    with get_connection() as connection:
+        connection.execute(
+            f"UPDATE users SET {platform_id}_profile_id = ? WHERE id = ?",
+            (int(profile["id"]), user_id),
+        )
+    return True, "Профиль применен к площадке.", get_user_by_id(user_id)
+
+
+def get_notification_settings(user_id: int) -> dict[str, Any]:
+    """Return notification settings without exposing Telegram bot token."""
+
+    user = get_user_by_id(user_id) or {}
+    chat_id = str(user.get("notify_tg_chat_id") or "").strip()
+    token_configured = bool(
+        (os.getenv("RESTREAM_TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+    )
+    return {
+        "telegram_enabled": bool(user.get("notify_tg_enabled")),
+        "telegram_chat_id_masked": mask_secret_value(chat_id),
+        "telegram_chat_id_set": bool(chat_id),
+        "telegram_bot_configured": token_configured,
+    }
+
+
+def update_notification_settings(
+    user_id: int,
+    *,
+    telegram_enabled: bool | None = None,
+    telegram_chat_id: str | None = None,
+) -> tuple[bool, str, dict[str, Any]]:
+    """Update per-user Telegram notification preferences."""
+
+    assignments: list[str] = []
+    values: list[Any] = []
+    if telegram_enabled is not None:
+        assignments.append("notify_tg_enabled = ?")
+        values.append(1 if telegram_enabled else 0)
+    if telegram_chat_id is not None:
+        candidate = telegram_chat_id.strip()
+        if candidate and (
+            candidate == mask_secret_value(candidate) or set(candidate) <= {"*", "•"}
+        ):
+            # Keep existing chat id when masked placeholder is submitted.
+            pass
+        else:
+            assignments.append("notify_tg_chat_id = ?")
+            values.append(candidate)
+    if not assignments:
+        return True, "Настройки уведомлений без изменений.", get_notification_settings(user_id)
+    values.append(user_id)
+    with get_connection() as connection:
+        connection.execute(
+            f"UPDATE users SET {', '.join(assignments)} WHERE id = ?",
+            values,
+        )
+    return True, "Настройки уведомлений сохранены.", get_notification_settings(user_id)
+
+
+def get_user_telegram_chat_id(user_id: int) -> str | None:
+    """Return raw chat id for server-side Telegram delivery only."""
+
+    user = get_user_by_id(user_id)
+    if not user or not user.get("notify_tg_enabled"):
+        return None
+    chat_id = str(user.get("notify_tg_chat_id") or "").strip()
+    return chat_id or None
 
 
 try:

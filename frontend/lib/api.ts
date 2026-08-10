@@ -10,18 +10,50 @@ export type User = {
   is_active: number | boolean;
   yt_active: number | boolean;
   yt_key: string;
+  yt_profile_id?: number | null;
   vk_active: number | boolean;
   vk_url: string;
   vk_key: string;
+  vk_profile_id?: number | null;
   rt_active: number | boolean;
   rt_url: string;
   rt_key: string;
+  rt_profile_id?: number | null;
   tg_active: number | boolean;
   tg_url: string;
   tg_key: string;
+  tg_profile_id?: number | null;
   custom_active: number | boolean;
   custom_url: string;
   custom_key: string;
+  custom_profile_id?: number | null;
+  notify_tg_enabled?: boolean;
+  notify_tg_chat_id_masked?: string;
+  notify_tg_chat_id_set?: boolean;
+  telegram_bot_configured?: boolean;
+};
+
+export type DestinationPlatformId = "yt" | "vk" | "rt" | "tg" | "custom";
+
+export type DestinationProfile = {
+  id: number;
+  user_id: number;
+  name: string;
+  platform_id: DestinationPlatformId | string;
+  base_url: string;
+  has_stream_key: boolean;
+  stream_key_masked: string;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type NotificationSettings = {
+  code?: number;
+  message?: string;
+  telegram_enabled: boolean;
+  telegram_chat_id_masked: string;
+  telegram_chat_id_set: boolean;
+  telegram_bot_configured: boolean;
 };
 
 export type StreamStatus = {
@@ -345,6 +377,101 @@ export async function changeMyPassword(currentPassword: string, newPassword: str
       method: "POST",
       body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
     },
+    token,
+  );
+}
+
+export async function listDestinationProfiles(token?: string) {
+  return request<{ code: number; profiles: DestinationProfile[] }>(
+    "/api/me/destination-profiles",
+    {},
+    token,
+  );
+}
+
+export async function createDestinationProfile(
+  payload: {
+    name: string;
+    platform_id: DestinationPlatformId | string;
+    base_url?: string;
+    stream_key: string;
+  },
+  token?: string,
+) {
+  return request<{ code: number; message: string; profile: DestinationProfile }>(
+    "/api/me/destination-profiles",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+    token,
+  );
+}
+
+export async function updateDestinationProfile(
+  profileId: number,
+  payload: {
+    name?: string;
+    base_url?: string;
+    stream_key?: string;
+  },
+  token?: string,
+) {
+  return request<{ code: number; message: string; profile: DestinationProfile }>(
+    `/api/me/destination-profiles/${profileId}`,
+    {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    },
+    token,
+  );
+}
+
+export async function deleteDestinationProfile(profileId: number, token?: string) {
+  return request<{ code: number; message: string }>(
+    `/api/me/destination-profiles/${profileId}`,
+    { method: "DELETE" },
+    token,
+  );
+}
+
+export async function applyDestinationProfile(
+  profileId: number,
+  activate = false,
+  token?: string,
+) {
+  return request<{ code: number; message: string; user: User; ffmpeg_started?: boolean }>(
+    `/api/me/destination-profiles/${profileId}/apply`,
+    {
+      method: "POST",
+      body: JSON.stringify({ activate }),
+    },
+    token,
+  );
+}
+
+export async function getNotificationSettings(token?: string) {
+  return request<NotificationSettings>("/api/me/notifications", {}, token);
+}
+
+export async function updateNotificationSettings(
+  payload: { telegram_enabled?: boolean; telegram_chat_id?: string },
+  token?: string,
+) {
+  return request<NotificationSettings>(
+    "/api/me/notifications",
+    {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    },
+    token,
+  );
+}
+
+export async function testTelegramNotification(token?: string) {
+  return request<NotificationSettings>(
+    "/api/me/notifications/telegram/test",
+    { method: "POST" },
     token,
   );
 }

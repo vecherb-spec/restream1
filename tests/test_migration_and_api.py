@@ -39,6 +39,8 @@ class MigrationFieldTests(unittest.TestCase):
         self.assertIn("stream_title", migrate.USER_FIELDS)
         self.assertIn("stream_key", migrate.USER_FIELDS)
         self.assertIn("max_destinations", migrate.USER_FIELDS)
+        self.assertIn("notify_tg_enabled", migrate.USER_FIELDS)
+        self.assertIn("yt_profile_id", migrate.USER_FIELDS)
 
     def test_read_sqlite_users_preserves_stream_title(self) -> None:
         import sqlite3

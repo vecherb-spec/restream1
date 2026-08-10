@@ -528,6 +528,40 @@ select {
   margin: 16px 0;
 }
 
+.destination-profile-list {
+  display: grid;
+  gap: 10px;
+  margin: 12px 0 4px;
+}
+
+.destination-profile-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.destination-profile-row strong {
+  display: block;
+}
+
+.destination-profile-row small {
+  color: var(--muted);
+}
+
+.destination-profile-form {
+  margin-top: 16px;
+}
+
+.toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 12px 0;
+}
+
 .client-log-card {
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 22px;

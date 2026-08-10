@@ -183,6 +183,73 @@ class PostgresIntegrationTests(unittest.TestCase):
             # auth_sessions / password_reset_tokens must exist
             connection.execute("SELECT 1 FROM auth_sessions LIMIT 1").fetchone()
             connection.execute("SELECT 1 FROM password_reset_tokens LIMIT 1").fetchone()
+            connection.execute("SELECT 1 FROM destination_profiles LIMIT 1").fetchone()
+
+    def test_05_destination_profiles_and_notifications(self) -> None:
+        db = self.db
+        ok, message, user = db.create_user(self.username, self.password, self.email)
+        self.assertTrue(ok, message)
+        assert user is not None
+        user_id = int(user["id"])
+
+        ok, message, profile = db.create_destination_profile(
+            user_id,
+            "YouTube Церковь",
+            "yt",
+            stream_key="pg-yt-secret",
+        )
+        self.assertTrue(ok, message)
+        assert profile is not None
+        self.assertEqual(profile["stream_key_masked"], "************")
+        self.assertNotIn("stream_key", profile)
+        self.assertNotIn("pg-yt-secret", str(profile))
+
+        listed = db.list_destination_profiles(user_id)
+        self.assertEqual(len(listed), 1)
+
+        ok, message, updated = db.update_destination_profile(
+            user_id,
+            int(profile["id"]),
+            name="YouTube PG",
+            stream_key="************",
+        )
+        self.assertTrue(ok, message)
+        assert updated is not None
+        raw = db.get_destination_profile(user_id, int(profile["id"]))
+        assert raw is not None
+        self.assertEqual(raw["stream_key"], "pg-yt-secret")
+
+        ok, message, applied = db.apply_destination_profile(user_id, int(profile["id"]))
+        self.assertTrue(ok, message)
+        assert applied is not None
+        self.assertEqual(applied.get("yt_key"), "pg-yt-secret")
+        self.assertEqual(int(applied.get("yt_profile_id")), int(profile["id"]))
+
+        # Legacy destination without profile_id continues to work.
+        db.update_restream_settings(
+            user_id,
+            {"vk_active": 1, "vk_url": "rtmp://vk.example/app", "vk_key": "vk-legacy", "vk_profile_id": None},
+        )
+        fresh = db.get_user_by_id(user_id)
+        assert fresh is not None
+        self.assertIn(fresh.get("vk_profile_id"), (None,))
+        specs = db.get_enabled_destination_specs(fresh)
+        self.assertTrue(any(spec["id"] == "vk" for spec in specs))
+
+        ok, message, settings = db.update_notification_settings(
+            user_id,
+            telegram_enabled=True,
+            telegram_chat_id="424242",
+        )
+        self.assertTrue(ok, message)
+        self.assertTrue(settings["telegram_enabled"])
+        self.assertEqual(settings["telegram_chat_id_masked"], "************")
+        self.assertNotIn("424242", str(settings))
+        self.assertEqual(db.get_user_telegram_chat_id(user_id), "424242")
+
+        ok, message = db.delete_destination_profile(user_id, int(profile["id"]))
+        self.assertTrue(ok, message)
+        self.assertEqual(db.list_destination_profiles(user_id), [])
 
 
 if __name__ == "__main__":

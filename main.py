@@ -62,30 +62,54 @@ from starlette.requests import Request as StarletteRequest
 from database import (
     DATABASE_BACKEND,
     DATABASE_PATH,
+    apply_destination_profile,
     authenticate_user,
     change_user_password,
     check_database,
     create_auth_session,
     create_database_backup,
+    create_destination_profile,
     create_password_reset_token,
     create_user,
     delete_auth_session,
+    delete_destination_profile,
     get_active_user_by_stream_key,
     get_enabled_destination_specs,
+    get_notification_settings,
     get_user_by_id,
     get_user_by_session_token,
+    get_user_by_stream_key,
+    get_user_telegram_chat_id,
     init_db,
     list_database_backups,
+    list_destination_profiles,
     list_users,
+    mask_secret_value,
     regenerate_user_stream_key,
     reset_password_with_token,
     set_user_active,
+    update_destination_profile,
+    update_notification_settings,
     update_user_plan,
     update_stream_title,
     update_restream_settings,
     update_user_password,
     validate_destination_limit,
     validate_destination_urls,
+)
+from telegram_notify import (
+    DestinationNotifyTracker,
+    NotificationGate,
+    build_critical_worker_error_message,
+    build_destination_error_message,
+    build_destination_reconnecting_message,
+    build_destination_recovered_message,
+    build_stream_started_message,
+    build_stream_stopped_message,
+    local_time_hhmmss,
+    notification_public_status,
+    send_telegram_message,
+    telegram_bot_configured,
 )
 
 
@@ -257,19 +281,46 @@ class RegisterPayload(BaseModel):
 class RestreamSettingsPayload(BaseModel):
     yt_active: bool | None = None
     yt_key: str | None = None
+    yt_profile_id: int | None = None
     vk_active: bool | None = None
     vk_url: str | None = None
     vk_key: str | None = None
+    vk_profile_id: int | None = None
     rt_active: bool | None = None
     rt_url: str | None = None
     rt_key: str | None = None
+    rt_profile_id: int | None = None
     tg_active: bool | None = None
     tg_url: str | None = None
     tg_key: str | None = None
+    tg_profile_id: int | None = None
     custom_active: bool | None = None
     custom_url: str | None = None
     custom_key: str | None = None
+    custom_profile_id: int | None = None
     stream_title: str | None = None
+
+
+class DestinationProfileCreatePayload(BaseModel):
+    name: str
+    platform_id: str
+    base_url: str = ""
+    stream_key: str = ""
+
+
+class DestinationProfileUpdatePayload(BaseModel):
+    name: str | None = None
+    base_url: str | None = None
+    stream_key: str | None = None
+
+
+class DestinationProfileApplyPayload(BaseModel):
+    activate: bool = False
+
+
+class NotificationSettingsPayload(BaseModel):
+    telegram_enabled: bool | None = None
+    telegram_chat_id: str | None = None
 
 
 class PasswordChangePayload(BaseModel):
@@ -308,7 +359,14 @@ def public_user(user: dict[str, Any] | None) -> dict[str, Any] | None:
 
     if user is None:
         return None
-    return {key: value for key, value in user.items() if key != "password"}
+    payload = {key: value for key, value in user.items() if key != "password"}
+    # Never echo raw Telegram chat id; frontend sees a fixed mask only.
+    chat_id = str(payload.pop("notify_tg_chat_id", "") or "")
+    payload["notify_tg_enabled"] = bool(payload.get("notify_tg_enabled"))
+    payload["notify_tg_chat_id_masked"] = mask_secret_value(chat_id)
+    payload["notify_tg_chat_id_set"] = bool(chat_id.strip())
+    payload["telegram_bot_configured"] = telegram_bot_configured()
+    return payload
 
 
 def set_session_cookie(response: Response, token: str) -> None:
@@ -827,6 +885,127 @@ def record_worker_error(worker_key: str, error: str) -> None:
     telemetry = worker_telemetry(worker_key)
     telemetry["last_error"] = (error or "unknown error")[:300]
     telemetry["last_error_at"] = utc_now_iso()
+
+
+notify_gate = NotificationGate()
+notify_tracker = DestinationNotifyTracker()
+
+
+def _platform_label_for_worker(worker_key: str) -> str:
+    _stream_key, platform_id = split_worker_key(worker_key)
+    with process_lock:
+        entry = active_processes.get(worker_key) or {}
+        title = str(entry.get("platform_title") or "")
+    return title or platform_title(platform_id)
+
+
+def _send_user_telegram(user_id: int, text: str) -> bool:
+    """Deliver a Telegram message for an enabled user; never logs secrets."""
+
+    chat_id = get_user_telegram_chat_id(user_id)
+    if not chat_id:
+        return False
+    if not telegram_bot_configured():
+        return False
+    ok, _message = send_telegram_message(chat_id, text)
+    return ok
+
+
+def notify_stream_event(stream_key: str, event: str) -> None:
+    """Notify stream started/stopped at most once per cooldown window."""
+
+    user = get_user_by_stream_key(stream_key)
+    if user is None:
+        return
+    user_id = int(user["id"])
+    gate_key = f"stream:{user_id}:{stream_key}:{event}"
+    if not notify_gate.allow(gate_key):
+        return
+    username = str(user.get("username") or stream_key)
+    when = local_time_hhmmss()
+    if event == "started":
+        text = build_stream_started_message(username, when=when)
+    elif event == "stopped":
+        text = build_stream_stopped_message(username, when=when)
+    else:
+        return
+    _send_user_telegram(user_id, text)
+
+
+def notify_destination_error(
+    worker_key: str,
+    error: str,
+    *,
+    restart_in_seconds: int | None = None,
+) -> None:
+    """Send one ERROR notification per destination outage (no watchdog spam)."""
+
+    if not notify_tracker.begin_error(worker_key):
+        return
+    stream_key, _platform_id = split_worker_key(worker_key)
+    user = get_user_by_stream_key(stream_key)
+    if user is None:
+        return
+    text = build_destination_error_message(
+        _platform_label_for_worker(worker_key),
+        error=error,
+        restart_in_seconds=restart_in_seconds,
+        when=local_time_hhmmss(),
+    )
+    _send_user_telegram(int(user["id"]), text)
+
+
+def notify_destination_reconnecting(worker_key: str, restart_in_seconds: int | None = None) -> None:
+    """Send at most one RECONNECTING notification per destination outage."""
+
+    if not notify_tracker.begin_reconnecting(worker_key):
+        return
+    stream_key, _platform_id = split_worker_key(worker_key)
+    user = get_user_by_stream_key(stream_key)
+    if user is None:
+        return
+    text = build_destination_reconnecting_message(
+        _platform_label_for_worker(worker_key),
+        restart_in_seconds=restart_in_seconds,
+        when=local_time_hhmmss(),
+    )
+    _send_user_telegram(int(user["id"]), text)
+
+
+def notify_destination_critical(worker_key: str, error: str) -> None:
+    """Send at most one CRITICAL notification per destination outage."""
+
+    if not notify_tracker.begin_critical(worker_key):
+        return
+    stream_key, _platform_id = split_worker_key(worker_key)
+    user = get_user_by_stream_key(stream_key)
+    if user is None:
+        return
+    text = build_critical_worker_error_message(
+        _platform_label_for_worker(worker_key),
+        error=error,
+        when=local_time_hhmmss(),
+    )
+    _send_user_telegram(int(user["id"]), text)
+
+
+def notify_destination_recovered(worker_key: str) -> None:
+    """Send one recovery notification when a destination returns after an outage."""
+
+    downtime = notify_tracker.recover(worker_key)
+    if downtime is None:
+        return
+    stream_key, _platform_id = split_worker_key(worker_key)
+    user = get_user_by_stream_key(stream_key)
+    if user is None:
+        return
+    reconnects = int(worker_telemetry(worker_key).get("reconnect_count") or 0)
+    text = build_destination_recovered_message(
+        _platform_label_for_worker(worker_key),
+        downtime_seconds=int(downtime),
+        reconnects=reconnects,
+    )
+    _send_user_telegram(int(user["id"]), text)
 
 
 def clear_worker_pending_restart(worker_key: str) -> None:
@@ -2077,10 +2256,12 @@ def maybe_restart_ffmpeg(worker_key: str, return_code: int) -> None:
     # Preview budget first so aborted restarts do not burn the rolling window.
     delay = next_restart_delay_seconds(worker_key, consume=False)
     if delay is None:
-        record_worker_error(
-            worker_key,
-            f"temporarily disabled: >{FFMPEG_MAX_RESTARTS} restarts in {int(FFMPEG_RESTART_WINDOW_SECONDS)}s",
+        critical_error = (
+            f"temporarily disabled: >{FFMPEG_MAX_RESTARTS} restarts "
+            f"in {int(FFMPEG_RESTART_WINDOW_SECONDS)}s"
         )
+        record_worker_error(worker_key, critical_error)
+        notify_destination_critical(worker_key, critical_error)
         logger.error(
             "FFmpeg worker %s exceeded %s restarts in %ss; temporarily disabled",
             worker_key,
@@ -2113,6 +2294,7 @@ def maybe_restart_ffmpeg(worker_key: str, return_code: int) -> None:
             delay,
             f"auto-restart after exit code {return_code}",
         )
+    notify_destination_reconnecting(worker_key, int(delay))
 
     if delay:
         time.sleep(delay)
@@ -2146,6 +2328,7 @@ def maybe_restart_ffmpeg(worker_key: str, return_code: int) -> None:
         start_ffmpeg_worker(stream_key, destination)
     except Exception as exc:
         record_worker_error(worker_key, f"auto-restart failed: {exc}")
+        notify_destination_critical(worker_key, f"auto-restart failed: {exc}")
         logger.exception("Failed to auto-restart FFmpeg worker %s", worker_key)
 
 
@@ -2170,7 +2353,14 @@ def monitor_process(worker_key: str, process: Any) -> None:
         with process_lock:
             telemetry = worker_telemetry(worker_key)
             telemetry["reconnect_count"] = int(telemetry.get("reconnect_count") or 0) + 1
-        record_worker_error(worker_key, f"FFmpeg exited with code {return_code}")
+        error = f"FFmpeg exited with code {return_code}"
+        record_worker_error(worker_key, error)
+        preview_delay = next_restart_delay_seconds(worker_key, consume=False)
+        notify_destination_error(
+            worker_key,
+            error,
+            restart_in_seconds=int(preview_delay) if preview_delay is not None else None,
+        )
         logger.error("FFmpeg worker %s exited with code %s", worker_key, return_code)
         maybe_restart_ffmpeg(worker_key, return_code)
     else:
@@ -2390,6 +2580,9 @@ def start_ffmpeg_worker(stream_key: str, destination: dict[str, str]) -> bool:
 
     attach_monitor_threads(worker_key, process, progress_path, input_url=input_url)
     persist_publishers_state()
+    # If this start heals an outage that did not go through maybe_restart_ffmpeg,
+    # still clear tracker state (no message when there was no prior outage).
+    notify_destination_recovered(worker_key)
     return True
 
 
@@ -2727,6 +2920,174 @@ def api_my_stream_status_events(
     )
 
 
+@app.get("/api/me/destination-profiles")
+def api_list_destination_profiles(
+    user: dict[str, Any] = Depends(get_current_api_user),
+) -> dict[str, Any]:
+    """List destination profiles owned by the current user (secrets masked)."""
+
+    profiles = list_destination_profiles(int(user["id"]))
+    return {"code": 0, "profiles": profiles}
+
+
+@app.post("/api/me/destination-profiles")
+def api_create_destination_profile(
+    payload: DestinationProfileCreatePayload,
+    user: dict[str, Any] = Depends(get_current_api_user),
+) -> dict[str, Any]:
+    """Create a reusable destination profile."""
+
+    ok, message, profile = create_destination_profile(
+        int(user["id"]),
+        payload.name,
+        payload.platform_id,
+        base_url=payload.base_url,
+        stream_key=payload.stream_key,
+    )
+    if not ok or profile is None:
+        raise HTTPException(status_code=400, detail=message)
+    return {"code": 0, "message": message, "profile": profile}
+
+
+@app.put("/api/me/destination-profiles/{profile_id}")
+@app.patch("/api/me/destination-profiles/{profile_id}")
+def api_update_destination_profile(
+    profile_id: int,
+    payload: DestinationProfileUpdatePayload,
+    user: dict[str, Any] = Depends(get_current_api_user),
+) -> dict[str, Any]:
+    """Update a profile. Masked/empty stream_key keeps the existing secret."""
+
+    updates = model_to_dict(payload, exclude_unset=True)
+    ok, message, profile = update_destination_profile(
+        int(user["id"]),
+        profile_id,
+        name=updates.get("name"),
+        base_url=updates.get("base_url"),
+        stream_key=updates.get("stream_key"),
+    )
+    if not ok or profile is None:
+        status = 404 if message == "Профиль не найден." else 400
+        raise HTTPException(status_code=status, detail=message)
+    return {"code": 0, "message": message, "profile": profile}
+
+
+@app.delete("/api/me/destination-profiles/{profile_id}")
+def api_delete_destination_profile(
+    profile_id: int,
+    user: dict[str, Any] = Depends(get_current_api_user),
+) -> dict[str, Any]:
+    """Delete a destination profile owned by the current user."""
+
+    ok, message = delete_destination_profile(int(user["id"]), profile_id)
+    if not ok:
+        raise HTTPException(status_code=404 if message == "Профиль не найден." else 400, detail=message)
+    return {"code": 0, "message": message}
+
+
+@app.post("/api/me/destination-profiles/{profile_id}/apply")
+def api_apply_destination_profile(
+    profile_id: int,
+    payload: DestinationProfileApplyPayload,
+    user: dict[str, Any] = Depends(get_current_api_user),
+) -> dict[str, Any]:
+    """Copy profile credentials into the existing flat destination slot."""
+
+    ok, message, fresh_user = apply_destination_profile(
+        int(user["id"]),
+        profile_id,
+        activate=False,
+    )
+    if not ok or fresh_user is None:
+        status = 404 if message == "Профиль не найден." else 400
+        raise HTTPException(status_code=status, detail=message)
+
+    ffmpeg_started = False
+    if payload.activate:
+        platform_id = None
+        for candidate in ("yt", "vk", "rt", "tg", "custom"):
+            if int(fresh_user.get(f"{candidate}_profile_id") or 0) == int(profile_id):
+                platform_id = candidate
+                break
+        if platform_id is None:
+            raise HTTPException(status_code=400, detail="Не удалось определить площадку профиля")
+        settings = {f"{platform_id}_active": 1}
+        pending = build_pending_user_settings(fresh_user, settings)
+        allowed, limit_message = validate_destination_limit(pending)
+        if not allowed:
+            raise HTTPException(status_code=400, detail=limit_message)
+        urls_ok, urls_message = validate_destination_urls(pending)
+        if not urls_ok:
+            raise HTTPException(status_code=400, detail=urls_message)
+        update_restream_settings(int(user["id"]), settings)
+        fresh_user = get_user_by_id(int(user["id"]))
+        if fresh_user is None:
+            raise HTTPException(status_code=500, detail="Account refresh failed")
+        ffmpeg_started = sync_live_restream_worker(fresh_user)
+
+    return {
+        "code": 0,
+        "message": message,
+        "user": public_user(fresh_user),
+        "ffmpeg_started": ffmpeg_started,
+    }
+
+
+@app.get("/api/me/notifications")
+def api_get_notifications(user: dict[str, Any] = Depends(get_current_api_user)) -> dict[str, Any]:
+    """Return Telegram notification settings (no bot token, chat id masked)."""
+
+    settings = get_notification_settings(int(user["id"]))
+    return {"code": 0, **settings, **notification_public_status()}
+
+
+@app.put("/api/me/notifications")
+@app.patch("/api/me/notifications")
+def api_update_notifications(
+    payload: NotificationSettingsPayload,
+    user: dict[str, Any] = Depends(get_current_api_user),
+) -> dict[str, Any]:
+    """Enable/disable Telegram notifications and set chat id."""
+
+    ok, message, settings = update_notification_settings(
+        int(user["id"]),
+        telegram_enabled=payload.telegram_enabled,
+        telegram_chat_id=payload.telegram_chat_id,
+    )
+    if not ok:
+        raise HTTPException(status_code=400, detail=message)
+    return {"code": 0, "message": message, **settings, **notification_public_status()}
+
+
+@app.post("/api/me/notifications/telegram/test")
+def api_test_telegram_notification(
+    user: dict[str, Any] = Depends(get_current_api_user),
+) -> dict[str, Any]:
+    """Send a test Telegram message using server-side bot token."""
+
+    if not telegram_bot_configured():
+        raise HTTPException(status_code=400, detail="Telegram bot token is not configured on server")
+    chat_id = get_user_telegram_chat_id(int(user["id"]))
+    # Allow testing when chat id is set even if notifications are currently off.
+    if not chat_id:
+        fresh = get_user_by_id(int(user["id"])) or {}
+        chat_id = str(fresh.get("notify_tg_chat_id") or "").strip()
+    if not chat_id:
+        raise HTTPException(status_code=400, detail="Telegram chat id is not set")
+    ok, message = send_telegram_message(
+        chat_id,
+        f"✅ Restream: проверка Telegram для {user.get('username')}",
+    )
+    if not ok:
+        raise HTTPException(status_code=502, detail=message)
+    return {
+        "code": 0,
+        "message": "Тестовое сообщение отправлено.",
+        **get_notification_settings(int(user["id"])),
+        **notification_public_status(),
+    }
+
+
 @app.get("/api/me/stream-logs")
 def api_my_stream_logs(
     lines: int = 80,
@@ -2969,6 +3330,7 @@ async def on_publish(request: Request) -> JSONResponse:
         if publisher is not None:
             publisher["ffmpeg_started"] = started
     persist_publishers_state()
+    notify_stream_event(stream_key, "started")
 
     return JSONResponse(
         status_code=200,
@@ -2993,6 +3355,7 @@ async def on_unpublish(request: Request) -> JSONResponse:
 
     forget_publisher(stream_key)
     stopped = stop_process(stream_key, clear_restart_state=True)
+    notify_stream_event(stream_key, "stopped")
     return JSONResponse(
         status_code=200,
         content={"code": 0, "stream_key": stream_key, "stopped": stopped},
