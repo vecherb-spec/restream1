@@ -7,13 +7,17 @@ import os
 import sys
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-os.environ["RESTREAM_DB_PATH"] = str(Path(tempfile.gettempdir()) / "restream-migration-api-test.db")
+# Unique DB file per process so repeated pytest runs do not collide.
+_DB_FD, _DB_PATH = tempfile.mkstemp(prefix="restream-migration-api-", suffix=".db")
+os.close(_DB_FD)
+os.environ["RESTREAM_DB_PATH"] = _DB_PATH
 os.environ["RESTREAM_ADMIN_PASSWORD"] = "test-admin-password-123"
 os.environ["RESTREAM_ALLOW_PLAINTEXT_PASSWORDS"] = "false"
 os.environ["RESTREAM_ALLOW_INSECURE_DEFAULTS"] = "true"
@@ -142,6 +146,7 @@ class AuthApiTests(unittest.TestCase):
 
 class DatabaseSqliteIntegrationTests(unittest.TestCase):
     def test_user_login_stream_title_and_limits(self) -> None:
+        import database
         from database import (
             authenticate_user,
             create_user,
@@ -152,8 +157,16 @@ class DatabaseSqliteIntegrationTests(unittest.TestCase):
             update_stream_title,
         )
 
+        # Keep this test on an isolated SQLite file even if another module imported database first.
+        database.DATABASE_URL = ""
+        database.DATABASE_BACKEND = "sqlite"
+        database.DATABASE_PATH = Path(_DB_PATH)
+        if Path(_DB_PATH).exists():
+            Path(_DB_PATH).unlink()
+
         init_db()
-        ok, message, user = create_user("limit_user", "password123", "limit@example.com")
+        username = f"limit_user_{uuid.uuid4().hex[:12]}"
+        ok, message, user = create_user(username, "password123", f"{username}@example.com")
         self.assertTrue(ok, message)
         assert user is not None
         self.assertEqual(get_user_destination_limit(user), 1)
@@ -161,7 +174,7 @@ class DatabaseSqliteIntegrationTests(unittest.TestCase):
         update_restream_settings(int(user["id"]), {"yt_active": 1, "yt_key": "k"})
         success, title_message = update_stream_title(int(user["id"]), "Night Show")
         self.assertTrue(success, title_message)
-        auth = authenticate_user("limit_user", "password123")
+        auth = authenticate_user(username, "password123")
         assert auth is not None
         self.assertEqual(auth["stream_title"], "Night Show")
         fresh = get_user_by_id(int(user["id"]))
