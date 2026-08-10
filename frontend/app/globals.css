@@ -562,6 +562,23 @@ select {
   margin: 12px 0;
 }
 
+.telegram-bot-link-row {
+  margin: 8px 0 12px;
+}
+
+.telegram-bot-link {
+  color: #3ea6ff;
+  text-decoration: underline;
+  font-weight: 600;
+}
+
+a.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
+
 .client-log-card {
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 22px;

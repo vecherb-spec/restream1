@@ -1345,16 +1345,22 @@ function ClientProfile({
           />
         </label>
         <p className="muted">
-          Укажите логин Telegram (@username). Сначала откройте{" "}
-          {notifySettings?.telegram_bot_username ? (
-            <strong>{notifySettings.telegram_bot_username}</strong>
-          ) : (
-            "бота"
-          )}{" "}
-          и нажмите Start / отправьте /start — иначе сообщения не дойдут.
-          Token бота задаётся только на сервере (
+          Укажите логин Telegram (@username). Сначала откройте бота по ссылке ниже и нажмите Start /
+          отправьте /start — иначе сообщения не дойдут. Token бота задаётся только на сервере (
           {notifySettings?.telegram_bot_configured ? "настроен" : "не настроен"}).
         </p>
+        {notifySettings?.telegram_bot_username && (
+          <p className="telegram-bot-link-row">
+            <a
+              className="telegram-bot-link"
+              href={`https://t.me/${notifySettings.telegram_bot_username.replace(/^@/, "")}`}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Открыть {notifySettings.telegram_bot_username} в Telegram
+            </a>
+          </p>
+        )}
         {notifyError && <div className="error">{notifyError}</div>}
         {notifyMessage && <div className="alert">{notifyMessage}</div>}
         <div className="obs-actions">
@@ -1364,6 +1370,16 @@ function ClientProfile({
           <button className="button secondary" type="button" disabled={notifyBusy} onClick={() => void checkTelegram()}>
             Проверить Telegram
           </button>
+          {notifySettings?.telegram_bot_username && (
+            <a
+              className="button secondary"
+              href={`https://t.me/${notifySettings.telegram_bot_username.replace(/^@/, "")}`}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Открыть бота
+            </a>
+          )}
         </div>
       </form>
 
