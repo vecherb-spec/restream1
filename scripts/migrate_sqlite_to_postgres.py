@@ -49,6 +49,7 @@ USER_FIELDS = [
     "custom_profile_id",
     "notify_tg_enabled",
     "notify_tg_chat_id",
+    "notify_tg_username",
     "created_at",
 ]
 

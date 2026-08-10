@@ -435,6 +435,7 @@ def init_db() -> None:
         ensure_column(connection, "users", "stream_title", "TEXT NOT NULL DEFAULT 'Название трансляции'")
         ensure_column(connection, "users", "notify_tg_enabled", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(connection, "users", "notify_tg_chat_id", "TEXT DEFAULT ''")
+        ensure_column(connection, "users", "notify_tg_username", "TEXT DEFAULT ''")
         for platform_id in ("yt", "vk", "rt", "tg", "custom"):
             ensure_column(connection, "users", f"{platform_id}_profile_id", "INTEGER")
         connection.execute(
@@ -1397,17 +1398,23 @@ def apply_destination_profile(
 
 
 def get_notification_settings(user_id: int) -> dict[str, Any]:
-    """Return notification settings without exposing Telegram bot token."""
+    """Return notification settings without exposing Telegram bot token or raw chat id."""
+
+    from telegram_notify import format_telegram_username
 
     user = get_user_by_id(user_id) or {}
     chat_id = str(user.get("notify_tg_chat_id") or "").strip()
+    username = str(user.get("notify_tg_username") or "").strip().lstrip("@")
     token_configured = bool(
         (os.getenv("RESTREAM_TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
     )
     return {
         "telegram_enabled": bool(user.get("notify_tg_enabled")),
+        "telegram_username": format_telegram_username(username),
+        "telegram_username_set": bool(username),
         "telegram_chat_id_masked": mask_secret_value(chat_id),
         "telegram_chat_id_set": bool(chat_id),
+        "telegram_target_set": bool(username or chat_id),
         "telegram_bot_configured": token_configured,
     }
 
@@ -1416,25 +1423,70 @@ def update_notification_settings(
     user_id: int,
     *,
     telegram_enabled: bool | None = None,
+    telegram_username: str | None = None,
     telegram_chat_id: str | None = None,
+    resolve_username: bool = True,
 ) -> tuple[bool, str, dict[str, Any]]:
-    """Update per-user Telegram notification preferences."""
+    """Update per-user Telegram notification preferences.
+
+    Preferred input is telegram_username (@login). Numeric chat_id remains supported
+    for compatibility but is never required in the UI.
+    """
+
+    from telegram_notify import normalize_telegram_username, resolve_telegram_chat_id
 
     assignments: list[str] = []
     values: list[Any] = []
+    warning = ""
     if telegram_enabled is not None:
         assignments.append("notify_tg_enabled = ?")
         values.append(1 if telegram_enabled else 0)
-    if telegram_chat_id is not None:
+
+    if telegram_username is not None:
+        ok, username, error = normalize_telegram_username(telegram_username)
+        if not ok:
+            return False, error, get_notification_settings(user_id)
+        assignments.append("notify_tg_username = ?")
+        values.append(username)
+        if username and resolve_username:
+            resolved_ok, chat_id, resolve_message = resolve_telegram_chat_id(f"@{username}")
+            if resolved_ok:
+                assignments.append("notify_tg_chat_id = ?")
+                values.append(chat_id)
+            else:
+                warning = resolve_message
+                # Keep previous chat id if resolve failed; username is still saved.
+        elif not username:
+            assignments.append("notify_tg_chat_id = ?")
+            values.append("")
+
+    if telegram_chat_id is not None and telegram_username is None:
         candidate = telegram_chat_id.strip()
         if candidate and (
             candidate == mask_secret_value(candidate) or set(candidate) <= {"*", "•"}
         ):
             # Keep existing chat id when masked placeholder is submitted.
             pass
+        elif candidate.startswith("@") or (
+            candidate and not candidate.lstrip("-").isdigit()
+        ):
+            # Treat legacy field as username when a login is pasted there.
+            ok, username, error = normalize_telegram_username(candidate)
+            if not ok:
+                return False, error, get_notification_settings(user_id)
+            assignments.append("notify_tg_username = ?")
+            values.append(username)
+            if username and resolve_username:
+                resolved_ok, chat_id, resolve_message = resolve_telegram_chat_id(f"@{username}")
+                if resolved_ok:
+                    assignments.append("notify_tg_chat_id = ?")
+                    values.append(chat_id)
+                else:
+                    warning = resolve_message
         else:
             assignments.append("notify_tg_chat_id = ?")
             values.append(candidate)
+
     if not assignments:
         return True, "Настройки уведомлений без изменений.", get_notification_settings(user_id)
     values.append(user_id)
@@ -1443,17 +1495,42 @@ def update_notification_settings(
             f"UPDATE users SET {', '.join(assignments)} WHERE id = ?",
             values,
         )
-    return True, "Настройки уведомлений сохранены.", get_notification_settings(user_id)
+    message = "Настройки уведомлений сохранены."
+    if warning:
+        message = (
+            "Логин сохранён, но чат ещё не найден. "
+            "Откройте бота в Telegram, нажмите Start и нажмите «Проверить Telegram»."
+        )
+    return True, message, get_notification_settings(user_id)
 
 
 def get_user_telegram_chat_id(user_id: int) -> str | None:
-    """Return raw chat id for server-side Telegram delivery only."""
+    """Return delivery chat id for server-side Telegram messages.
+
+    Prefers a previously resolved numeric chat id; otherwise resolves @username.
+    """
+
+    from telegram_notify import resolve_telegram_chat_id
 
     user = get_user_by_id(user_id)
     if not user or not user.get("notify_tg_enabled"):
         return None
     chat_id = str(user.get("notify_tg_chat_id") or "").strip()
-    return chat_id or None
+    if chat_id:
+        return chat_id
+    username = str(user.get("notify_tg_username") or "").strip().lstrip("@")
+    if not username:
+        return None
+    ok, resolved, _message = resolve_telegram_chat_id(f"@{username}")
+    if not ok:
+        return f"@{username}"
+    # Persist resolved id for subsequent sends.
+    with get_connection() as connection:
+        connection.execute(
+            "UPDATE users SET notify_tg_chat_id = ? WHERE id = ?",
+            (resolved, user_id),
+        )
+    return resolved
 
 
 try:

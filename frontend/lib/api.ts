@@ -28,6 +28,7 @@ export type User = {
   custom_key: string;
   custom_profile_id?: number | null;
   notify_tg_enabled?: boolean;
+  notify_tg_username?: string;
   notify_tg_chat_id_masked?: string;
   notify_tg_chat_id_set?: boolean;
   telegram_bot_configured?: boolean;
@@ -51,8 +52,11 @@ export type NotificationSettings = {
   code?: number;
   message?: string;
   telegram_enabled: boolean;
+  telegram_username?: string;
+  telegram_username_set?: boolean;
   telegram_chat_id_masked: string;
   telegram_chat_id_set: boolean;
+  telegram_target_set?: boolean;
   telegram_bot_configured: boolean;
 };
 
@@ -455,7 +459,11 @@ export async function getNotificationSettings(token?: string) {
 }
 
 export async function updateNotificationSettings(
-  payload: { telegram_enabled?: boolean; telegram_chat_id?: string },
+  payload: {
+    telegram_enabled?: boolean;
+    telegram_username?: string;
+    telegram_chat_id?: string;
+  },
   token?: string,
 ) {
   return request<NotificationSettings>(

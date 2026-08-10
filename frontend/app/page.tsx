@@ -1020,7 +1020,7 @@ function ClientProfile({
   const [profileKey, setProfileKey] = useState("");
   const [notifySettings, setNotifySettings] = useState<NotificationSettings | null>(null);
   const [notifyEnabled, setNotifyEnabled] = useState(false);
-  const [notifyChatId, setNotifyChatId] = useState("");
+  const [notifyUsername, setNotifyUsername] = useState("");
   const [notifyBusy, setNotifyBusy] = useState(false);
   const [notifyMessage, setNotifyMessage] = useState("");
   const [notifyError, setNotifyError] = useState("");
@@ -1052,7 +1052,7 @@ function ClientProfile({
         }
         setNotifySettings(settings);
         setNotifyEnabled(Boolean(settings.telegram_enabled));
-        setNotifyChatId(settings.telegram_chat_id_set ? settings.telegram_chat_id_masked || "************" : "");
+        setNotifyUsername(settings.telegram_username || "");
       })
       .catch((requestError) => {
         if (active) {
@@ -1161,22 +1161,18 @@ function ClientProfile({
     setNotifyError("");
     setNotifyMessage("");
     try {
-      const payload: { telegram_enabled: boolean; telegram_chat_id?: string } = {
+      const settings = await updateNotificationSettings({
         telegram_enabled: notifyEnabled,
-      };
-      if (notifyChatId && !/^[*•]+$/.test(notifyChatId)) {
-        payload.telegram_chat_id = notifyChatId;
-      } else if (notifyChatId) {
-        payload.telegram_chat_id = notifyChatId;
-      }
-      const settings = await updateNotificationSettings(payload);
+        telegram_username: notifyUsername.trim(),
+      });
       setNotifySettings(settings);
       setNotifyEnabled(Boolean(settings.telegram_enabled));
-      setNotifyChatId(settings.telegram_chat_id_set ? settings.telegram_chat_id_masked || "************" : "");
+      setNotifyUsername(settings.telegram_username || "");
       setNotifyMessage(settings.message || "Настройки уведомлений сохранены.");
       onUserChange({
         ...user,
         notify_tg_enabled: settings.telegram_enabled,
+        notify_tg_username: settings.telegram_username,
         notify_tg_chat_id_masked: settings.telegram_chat_id_masked,
         notify_tg_chat_id_set: settings.telegram_chat_id_set,
         telegram_bot_configured: settings.telegram_bot_configured,
@@ -1193,14 +1189,13 @@ function ClientProfile({
     setNotifyError("");
     setNotifyMessage("");
     try {
-      if (notifyChatId && !/^[*•]+$/.test(notifyChatId)) {
-        await updateNotificationSettings({
-          telegram_enabled: notifyEnabled,
-          telegram_chat_id: notifyChatId,
-        });
-      }
+      await updateNotificationSettings({
+        telegram_enabled: notifyEnabled,
+        telegram_username: notifyUsername.trim(),
+      });
       const settings = await testTelegramNotification();
       setNotifySettings(settings);
+      setNotifyUsername(settings.telegram_username || notifyUsername);
       setNotifyMessage(settings.message || "Тестовое сообщение отправлено.");
     } catch (requestError) {
       setNotifyError(requestError instanceof Error ? requestError.message : "Не удалось проверить Telegram");
@@ -1339,18 +1334,19 @@ function ClientProfile({
           <strong>{notifyEnabled ? "ON" : "OFF"}</strong>
         </label>
         <label className="field">
-          Telegram Chat ID
+          Telegram логин
           <input
-            type="password"
-            value={notifyChatId}
-            onChange={(event) => setNotifyChatId(event.target.value)}
-            placeholder="********"
+            type="text"
+            value={notifyUsername}
+            onChange={(event) => setNotifyUsername(event.target.value)}
+            placeholder="@username"
             autoComplete="off"
+            spellCheck={false}
           />
         </label>
         <p className="muted">
+          Укажите логин Telegram (@username). Сначала откройте бота и нажмите Start — иначе сообщения не дойдут.
           Bot token задаётся только на сервере ({notifySettings?.telegram_bot_configured ? "настроен" : "не настроен"}).
-          Секреты в интерфейсе не показываются.
         </p>
         {notifyError && <div className="error">{notifyError}</div>}
         {notifyMessage && <div className="alert">{notifyMessage}</div>}

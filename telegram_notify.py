@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import time
 import urllib.error
@@ -20,6 +21,7 @@ logger = logging.getLogger("restream.telegram")
 
 _TOKEN_ENV_KEYS = ("RESTREAM_TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_TOKEN")
 DEFAULT_EVENT_COOLDOWN_SECONDS = 45.0
+_TELEGRAM_USERNAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{4,31}$")
 
 
 class NotificationGate:
@@ -130,30 +132,50 @@ def telegram_bot_configured() -> bool:
     return bool(telegram_bot_token())
 
 
+def normalize_telegram_username(value: str | None) -> tuple[bool, str, str]:
+    """Normalize a Telegram login to bare username (without @).
+
+    Returns (ok, username_or_empty, error_message).
+    """
+
+    raw = (value or "").strip()
+    if not raw:
+        return True, "", ""
+    if raw.startswith("https://t.me/") or raw.startswith("http://t.me/"):
+        raw = raw.split("t.me/", 1)[1]
+    raw = raw.split("?", 1)[0].strip().strip("/")
+    if raw.startswith("@"):
+        raw = raw[1:]
+    raw = raw.strip()
+    if not _TELEGRAM_USERNAME_RE.fullmatch(raw):
+        return (
+            False,
+            "",
+            "Укажите логин Telegram вида @username (латиница, 5–32 символа).",
+        )
+    return True, raw, ""
+
+
+def format_telegram_username(username: str | None) -> str:
+    value = (username or "").strip().lstrip("@")
+    return f"@{value}" if value else ""
+
+
 def _redact_token(text: str, token: str) -> str:
     if token and token in text:
         return text.replace(token, "[redacted]")
     return text
 
 
-def send_telegram_message(chat_id: str, text: str, *, timeout: float = 8.0) -> tuple[bool, str]:
-    """Send a Telegram message. Never logs token or secret-bearing URLs."""
+def _telegram_api_call(method: str, params: dict[str, Any], *, timeout: float = 8.0) -> tuple[bool, dict[str, Any], str]:
+    """Call Telegram Bot API method. Never logs the bot token."""
 
     token = telegram_bot_token()
     if not token:
-        return False, "Telegram bot token is not configured"
-    chat_id = (chat_id or "").strip()
-    if not chat_id:
-        return False, "Telegram chat id is empty"
-    body = urllib.parse.urlencode(
-        {
-            "chat_id": chat_id,
-            "text": text[:3500],
-            "disable_web_page_preview": "true",
-        }
-    ).encode("utf-8")
+        return False, {}, "Telegram bot token is not configured"
+    body = urllib.parse.urlencode({key: str(value) for key, value in params.items()}).encode("utf-8")
     request = urllib.request.Request(
-        f"https://api.telegram.org/bot{token}/sendMessage",
+        f"https://api.telegram.org/bot{token}/{method}",
         data=body,
         method="POST",
         headers={"Content-Type": "application/x-www-form-urlencoded"},
@@ -168,17 +190,70 @@ def send_telegram_message(chat_id: str, text: str, *, timeout: float = 8.0) -> t
         except Exception:
             detail = ""
         detail = _redact_token(detail, token)
-        logger.warning("Telegram API HTTP error status=%s detail=%s", exc.code, detail or "-")
-        return False, f"Telegram API HTTP {exc.code}"
+        logger.warning("Telegram API %s HTTP error status=%s detail=%s", method, exc.code, detail or "-")
+        return False, {}, f"Telegram API HTTP {exc.code}"
     except Exception as exc:
-        # Do not use logger.exception — urllib may embed the request URL with the token.
-        logger.warning("Telegram API request failed: %s", type(exc).__name__)
-        return False, "Telegram API request failed"
+        logger.warning("Telegram API %s request failed: %s", method, type(exc).__name__)
+        return False, {}, "Telegram API request failed"
 
     if not payload.get("ok"):
         desc = _redact_token(str(payload.get("description") or "unknown")[:200], token)
-        logger.warning("Telegram API rejected message: %s", desc)
-        return False, "Telegram API rejected message"
+        logger.warning("Telegram API %s rejected: %s", method, desc)
+        return False, payload, desc or "Telegram API rejected request"
+    result = payload.get("result")
+    return True, (result if isinstance(result, dict) else {"result": result}), "ok"
+
+
+def resolve_telegram_chat_id(username_or_chat: str, *, timeout: float = 8.0) -> tuple[bool, str, str]:
+    """Resolve @username (or numeric id) to a Telegram chat id via getChat."""
+
+    target = (username_or_chat or "").strip()
+    if not target:
+        return False, "", "Telegram target is empty"
+    if target.lstrip("-").isdigit():
+        return True, target, "ok"
+    ok_user, username, error = normalize_telegram_username(target)
+    if not ok_user:
+        return False, "", error
+    ok, result, message = _telegram_api_call("getChat", {"chat_id": f"@{username}"}, timeout=timeout)
+    if not ok:
+        hint = (
+            "Не удалось найти чат по логину. Откройте бота в Telegram, нажмите Start "
+            "и повторите проверку."
+        )
+        return False, "", hint if "chat not found" in message.lower() or "not found" in message.lower() else message
+    chat_id = result.get("id")
+    if chat_id is None:
+        return False, "", "Telegram getChat did not return chat id"
+    return True, str(chat_id), "ok"
+
+
+def send_telegram_message(chat_id: str, text: str, *, timeout: float = 8.0) -> tuple[bool, str]:
+    """Send a Telegram message. Never logs token or secret-bearing URLs."""
+
+    token = telegram_bot_token()
+    if not token:
+        return False, "Telegram bot token is not configured"
+    chat_id = (chat_id or "").strip()
+    if not chat_id:
+        return False, "Telegram chat id is empty"
+    # Usernames must be resolved for private chats; numeric ids send directly.
+    if not chat_id.lstrip("-").isdigit():
+        ok, resolved, message = resolve_telegram_chat_id(chat_id, timeout=timeout)
+        if not ok:
+            return False, message
+        chat_id = resolved
+    ok, _result, message = _telegram_api_call(
+        "sendMessage",
+        {
+            "chat_id": chat_id,
+            "text": text[:3500],
+            "disable_web_page_preview": "true",
+        },
+        timeout=timeout,
+    )
+    if not ok:
+        return False, message if message.startswith("Telegram") else f"Telegram API rejected message"
     return True, "ok"
 
 

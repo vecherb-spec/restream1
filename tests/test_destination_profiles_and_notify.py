@@ -105,6 +105,7 @@ class DestinationProfileTests(unittest.TestCase):
         self.assertNotIn(os.environ["RESTREAM_TELEGRAM_BOT_TOKEN"], str(notify))
         self.assertNotIn("stream_key", notify)
         self.assertIn("telegram_chat_id_masked", notify)
+        self.assertIn("telegram_username", notify)
 
     def test_existing_destination_without_profile_still_works(self) -> None:
         db = self.db
@@ -391,6 +392,48 @@ class NotificationDebounceTests(unittest.TestCase):
             headers={"Authorization": f"Bearer {token}"},
         )
         self.assertEqual(deleted.status_code, 200)
+
+
+class TelegramUsernameTests(unittest.TestCase):
+    def test_normalize_telegram_username(self) -> None:
+        import telegram_notify
+
+        ok, username, error = telegram_notify.normalize_telegram_username("@ChurchLive")
+        self.assertTrue(ok, error)
+        self.assertEqual(username, "ChurchLive")
+
+        ok, username, error = telegram_notify.normalize_telegram_username("https://t.me/ChurchLive")
+        self.assertTrue(ok, error)
+        self.assertEqual(username, "ChurchLive")
+
+        ok, username, error = telegram_notify.normalize_telegram_username("ab")
+        self.assertFalse(ok)
+        self.assertEqual(username, "")
+
+    def test_save_username_without_numeric_chat_id(self) -> None:
+        import database
+
+        database.init_db()
+        suffix = uuid.uuid4().hex[:8]
+        ok, message, user = database.create_user(f"tguser_{suffix}", "password123", f"tguser_{suffix}@ex.com")
+        self.assertTrue(ok, message)
+        assert user is not None
+        user_id = int(user["id"])
+
+        with mock.patch("telegram_notify.resolve_telegram_chat_id", return_value=(True, "555001", "ok")):
+            ok, message, settings = database.update_notification_settings(
+                user_id,
+                telegram_enabled=True,
+                telegram_username="@ChurchNotify",
+            )
+        self.assertTrue(ok, message)
+        self.assertEqual(settings["telegram_username"], "@ChurchNotify")
+        self.assertTrue(settings["telegram_username_set"])
+        self.assertEqual(settings["telegram_chat_id_masked"], "************")
+        self.assertNotIn("555001", str(settings))
+
+        delivery = database.get_user_telegram_chat_id(user_id)
+        self.assertEqual(delivery, "555001")
 
 
 class SqliteBackendSmokeTests(unittest.TestCase):

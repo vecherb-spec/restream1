@@ -320,6 +320,7 @@ class DestinationProfileApplyPayload(BaseModel):
 
 class NotificationSettingsPayload(BaseModel):
     telegram_enabled: bool | None = None
+    telegram_username: str | None = None
     telegram_chat_id: str | None = None
 
 
@@ -360,9 +361,11 @@ def public_user(user: dict[str, Any] | None) -> dict[str, Any] | None:
     if user is None:
         return None
     payload = {key: value for key, value in user.items() if key != "password"}
-    # Never echo raw Telegram chat id; frontend sees a fixed mask only.
+    # Never echo raw Telegram chat id; username (public login) is OK to show.
     chat_id = str(payload.pop("notify_tg_chat_id", "") or "")
+    username = str(payload.pop("notify_tg_username", "") or "").strip().lstrip("@")
     payload["notify_tg_enabled"] = bool(payload.get("notify_tg_enabled"))
+    payload["notify_tg_username"] = f"@{username}" if username else ""
     payload["notify_tg_chat_id_masked"] = mask_secret_value(chat_id)
     payload["notify_tg_chat_id_set"] = bool(chat_id.strip())
     payload["telegram_bot_configured"] = telegram_bot_configured()
@@ -3047,11 +3050,12 @@ def api_update_notifications(
     payload: NotificationSettingsPayload,
     user: dict[str, Any] = Depends(get_current_api_user),
 ) -> dict[str, Any]:
-    """Enable/disable Telegram notifications and set chat id."""
+    """Enable/disable Telegram notifications and set Telegram login (@username)."""
 
     ok, message, settings = update_notification_settings(
         int(user["id"]),
         telegram_enabled=payload.telegram_enabled,
+        telegram_username=payload.telegram_username,
         telegram_chat_id=payload.telegram_chat_id,
     )
     if not ok:
@@ -3067,19 +3071,40 @@ def api_test_telegram_notification(
 
     if not telegram_bot_configured():
         raise HTTPException(status_code=400, detail="Telegram bot token is not configured on server")
-    chat_id = get_user_telegram_chat_id(int(user["id"]))
-    # Allow testing when chat id is set even if notifications are currently off.
-    if not chat_id:
+    fresh = get_user_by_id(int(user["id"])) or {}
+    # Allow testing even if notifications are currently off.
+    chat_id = str(fresh.get("notify_tg_chat_id") or "").strip()
+    username = str(fresh.get("notify_tg_username") or "").strip().lstrip("@")
+    target = chat_id or (f"@{username}" if username else "")
+    if not target:
+        raise HTTPException(
+            status_code=400,
+            detail="Укажите логин Telegram (@username) и сохраните настройки",
+        )
+    if not chat_id and username:
+        # Re-resolve and persist before sending.
+        ok_settings, resolve_message, _settings = update_notification_settings(
+            int(user["id"]),
+            telegram_username=f"@{username}",
+            resolve_username=True,
+        )
+        if not ok_settings:
+            raise HTTPException(status_code=400, detail=resolve_message)
         fresh = get_user_by_id(int(user["id"])) or {}
         chat_id = str(fresh.get("notify_tg_chat_id") or "").strip()
-    if not chat_id:
-        raise HTTPException(status_code=400, detail="Telegram chat id is not set")
+        target = chat_id or f"@{username}"
     ok, message = send_telegram_message(
-        chat_id,
+        target,
         f"✅ Restream: проверка Telegram для {user.get('username')}",
     )
     if not ok:
-        raise HTTPException(status_code=502, detail=message)
+        detail = message
+        if "Start" not in message and "не найден" not in message.lower():
+            detail = (
+                f"{message}. Откройте бота в Telegram, нажмите Start "
+                "и повторите проверку."
+            )
+        raise HTTPException(status_code=502, detail=detail)
     return {
         "code": 0,
         "message": "Тестовое сообщение отправлено.",
