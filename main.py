@@ -146,6 +146,11 @@ FFMPEG_BIN = os.getenv("FFMPEG_BIN", "ffmpeg")
 FFPROBE_BIN = os.getenv("FFPROBE_BIN", "ffprobe")
 FFMPEG_MAX_RESTARTS = max(0, int(os.getenv("RESTREAM_FFMPEG_MAX_RESTARTS", "5")))
 FFMPEG_RESTART_DELAY_SECONDS = max(0.0, float(os.getenv("RESTREAM_FFMPEG_RESTART_DELAY_SECONDS", "3")))
+# Network IO timeout for RTMP read/write (microseconds). Default: 15s.
+FFMPEG_RW_TIMEOUT_US = max(1_000_000, int(os.getenv("RESTREAM_FFMPEG_RW_TIMEOUT_US", "15000000")))
+# Kill FFmpeg if -progress stops advancing. 0 disables stall watchdog.
+FFMPEG_STALL_TIMEOUT_SECONDS = max(0.0, float(os.getenv("RESTREAM_FFMPEG_STALL_TIMEOUT_SECONDS", "45")))
+FFMPEG_STALL_GRACE_SECONDS = max(0.0, float(os.getenv("RESTREAM_FFMPEG_STALL_GRACE_SECONDS", "30")))
 LOG_DIR = Path(os.getenv("RESTREAM_LOG_DIR", "logs"))
 COOKIE_NAME = os.getenv("RESTREAM_COOKIE_NAME", "restream_session")
 COOKIE_MAX_AGE_SECONDS = int(os.getenv("RESTREAM_AUTH_SESSION_DAYS", "7")) * 24 * 60 * 60
@@ -489,6 +494,12 @@ def log_path_for_stream(stream_key: str) -> Path:
     return LOG_DIR / f"ffmpeg_{safe_log_name(stream_key)}_{timestamp}.log"
 
 
+def progress_path_for_log(log_path: Path) -> Path:
+    """Return the sidecar progress file path for an FFmpeg log."""
+
+    return log_path.with_name(f"{log_path.name}.progress")
+
+
 def find_latest_log_path_for_stream(stream_key: str) -> Path | None:
     """Find the newest FFmpeg log file for a stream key on disk."""
 
@@ -552,8 +563,8 @@ def tail_log_file(log_path: str | Path | None, lines: int = 80) -> list[str]:
     return content[-max(1, min(lines, 500)) :]
 
 
-def parse_ffmpeg_progress(log_path: str | Path | None) -> dict[str, Any]:
-    """Parse the latest FFmpeg -progress key/value block from a log file."""
+def parse_ffmpeg_progress(progress_path: str | Path | None) -> dict[str, Any]:
+    """Parse the latest FFmpeg -progress key/value block from a progress file."""
 
     metrics: dict[str, Any] = {
         "frame": 0,
@@ -564,7 +575,7 @@ def parse_ffmpeg_progress(log_path: str | Path | None) -> dict[str, Any]:
         "out_time_ms": None,
         "progress": "",
     }
-    for line in tail_log_file(log_path, lines=500):
+    for line in tail_log_file(progress_path, lines=500):
         if "=" not in line:
             continue
         key, value = line.split("=", 1)
@@ -600,7 +611,10 @@ def process_snapshot(stream_key: str, entry: dict[str, Any]) -> dict[str, Any]:
 
     process: subprocess.Popen[Any] = entry["process"]
     return_code = process.poll()
-    progress = parse_ffmpeg_progress(entry.get("log_path"))
+    progress_path = entry.get("progress_path") or (
+        progress_path_for_log(Path(entry["log_path"])) if entry.get("log_path") else None
+    )
+    progress = parse_ffmpeg_progress(progress_path)
     return {
         "stream_key": stream_key,
         "pid": process.pid,
@@ -609,6 +623,7 @@ def process_snapshot(stream_key: str, entry: dict[str, Any]) -> dict[str, Any]:
         "started_at": entry.get("started_at"),
         "destinations": entry.get("destinations", 0),
         "log_path": str(entry.get("log_path") or ""),
+        "progress_path": str(progress_path or ""),
         "frame": progress["frame"],
         "fps": progress["fps"],
         "bitrate": progress["bitrate"],
@@ -955,10 +970,15 @@ def system_metrics_payload() -> dict[str, Any]:
     }
 
 
-def build_ffmpeg_command(stream_key: str, destinations: list[str]) -> list[str]:
+def build_ffmpeg_command(
+    stream_key: str,
+    destinations: list[str],
+    progress_path: Path,
+) -> list[str]:
     """Build one FFmpeg command that fans out the input to all enabled outputs."""
 
     input_url = SRS_INPUT_URL_TEMPLATE.format(stream_key=stream_key)
+    timeout_us = str(FFMPEG_RW_TIMEOUT_US)
     command = [
         FFMPEG_BIN,
         "-hide_banner",
@@ -966,14 +986,17 @@ def build_ffmpeg_command(stream_key: str, destinations: list[str]) -> list[str]:
         "-loglevel",
         "warning",
         "-progress",
-        "pipe:2",
+        str(progress_path),
+        "-rw_timeout",
+        timeout_us,
         "-i",
         input_url,
         "-c",
         "copy",
     ]
     for destination in destinations:
-        command.extend(["-f", "flv", destination])
+        # Per-output network timeout so a hung RTMP target can fail the muxer.
+        command.extend(["-f", "flv", "-rw_timeout", timeout_us, destination])
     return command
 
 
@@ -1096,6 +1119,59 @@ def monitor_process(stream_key: str, process: subprocess.Popen[Any]) -> None:
         maybe_restart_ffmpeg(stream_key, return_code)
 
 
+def watch_ffmpeg_stall(
+    stream_key: str,
+    process: subprocess.Popen[Any],
+    progress_path: Path,
+) -> None:
+    """Kill FFmpeg when -progress stops advancing for too long."""
+
+    if FFMPEG_STALL_TIMEOUT_SECONDS <= 0:
+        return
+
+    if FFMPEG_STALL_GRACE_SECONDS:
+        time.sleep(FFMPEG_STALL_GRACE_SECONDS)
+
+    last_marker = ""
+    last_change = time.monotonic()
+
+    while process.poll() is None:
+        with process_lock:
+            current = active_processes.get(stream_key)
+            still_ours = bool(current and current.get("process") is process)
+            still_published = stream_key in active_publishers
+        if not still_ours or not still_published:
+            return
+
+        marker = ""
+        try:
+            if progress_path.is_file():
+                metrics = parse_ffmpeg_progress(progress_path)
+                marker = str(metrics.get("out_time_ms") or metrics.get("frame") or "")
+                if not marker:
+                    marker = str(progress_path.stat().st_mtime_ns)
+        except OSError:
+            marker = ""
+
+        now = time.monotonic()
+        if marker and marker != last_marker:
+            last_marker = marker
+            last_change = now
+        elif now - last_change >= FFMPEG_STALL_TIMEOUT_SECONDS:
+            logger.error(
+                "FFmpeg for %s stalled for %ss (no progress); killing hung process",
+                stream_key,
+                int(FFMPEG_STALL_TIMEOUT_SECONDS),
+            )
+            try:
+                process.kill()
+            except OSError:
+                logger.exception("Failed to kill stalled FFmpeg for %s", stream_key)
+            return
+
+        time.sleep(5)
+
+
 def start_ffmpeg(stream_key: str, destinations: list[str]) -> bool:
     """Start or replace a FFmpeg worker for the stream key."""
 
@@ -1107,14 +1183,18 @@ def start_ffmpeg(stream_key: str, destinations: list[str]) -> bool:
     stop_process(stream_key)
 
     input_url = SRS_INPUT_URL_TEMPLATE.format(stream_key=stream_key)
-    command = build_ffmpeg_command(stream_key, destinations)
+    log_path = log_path_for_stream(stream_key)
+    progress_path = progress_path_for_log(log_path)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    progress_path.write_text("", encoding="utf-8")
+
+    command = build_ffmpeg_command(stream_key, destinations, progress_path)
     redacted_command = command[:]
     for index, value in enumerate(redacted_command):
         if value.startswith("rtmp://") and index > 0:
             redacted_command[index] = "[RTMP_OUTPUT_REDACTED]"
     logger.info("Starting FFmpeg for %s: %s", stream_key, " ".join(redacted_command))
 
-    log_path = log_path_for_stream(stream_key)
     with log_path.open("ab") as log_file:
         log_file.write(f"[{utc_now_iso()}] Starting: {' '.join(redacted_command)}\n".encode("utf-8"))
         log_file.flush()
@@ -1131,6 +1211,7 @@ def start_ffmpeg(stream_key: str, destinations: list[str]) -> bool:
             "started_at": utc_now_iso(),
             "destinations": len(destinations),
             "log_path": log_path,
+            "progress_path": progress_path,
             "resolution": "",
         }
 
@@ -1138,6 +1219,12 @@ def start_ffmpeg(stream_key: str, destinations: list[str]) -> bool:
         target=monitor_process,
         args=(stream_key, process),
         name=f"ffmpeg-monitor-{stream_key}",
+        daemon=True,
+    ).start()
+    threading.Thread(
+        target=watch_ffmpeg_stall,
+        args=(stream_key, process, progress_path),
+        name=f"ffmpeg-stall-{stream_key}",
         daemon=True,
     ).start()
     threading.Thread(
