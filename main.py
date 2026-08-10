@@ -38,6 +38,7 @@ import socket
 import smtplib
 import subprocess
 import threading
+import time
 import json
 import asyncio
 from datetime import datetime, timezone
@@ -143,6 +144,8 @@ SRS_INPUT_URL_TEMPLATE = os.getenv(
 )
 FFMPEG_BIN = os.getenv("FFMPEG_BIN", "ffmpeg")
 FFPROBE_BIN = os.getenv("FFPROBE_BIN", "ffprobe")
+FFMPEG_MAX_RESTARTS = max(0, int(os.getenv("RESTREAM_FFMPEG_MAX_RESTARTS", "5")))
+FFMPEG_RESTART_DELAY_SECONDS = max(0.0, float(os.getenv("RESTREAM_FFMPEG_RESTART_DELAY_SECONDS", "3")))
 LOG_DIR = Path(os.getenv("RESTREAM_LOG_DIR", "logs"))
 COOKIE_NAME = os.getenv("RESTREAM_COOKIE_NAME", "restream_session")
 COOKIE_MAX_AGE_SECONDS = int(os.getenv("RESTREAM_AUTH_SESSION_DAYS", "7")) * 24 * 60 * 60
@@ -167,6 +170,7 @@ SRS_TRUSTED_IPS = {
 active_processes: dict[str, dict[str, Any]] = {}
 active_publishers: dict[str, dict[str, Any]] = {}
 recent_processes: list[dict[str, Any]] = []
+ffmpeg_restart_counts: dict[str, int] = {}
 process_lock = threading.Lock()
 
 
@@ -973,7 +977,7 @@ def build_ffmpeg_command(stream_key: str, destinations: list[str]) -> list[str]:
     return command
 
 
-def stop_process(stream_key: str) -> bool:
+def stop_process(stream_key: str, *, clear_restart_state: bool = False) -> bool:
     """Terminate a running FFmpeg worker for a stream key."""
 
     with process_lock:
@@ -1002,7 +1006,74 @@ def stop_process(stream_key: str) -> bool:
     with process_lock:
         recent_processes.insert(0, snapshot)
         del recent_processes[50:]
+    if clear_restart_state:
+        clear_ffmpeg_restart_state(stream_key)
     return True
+
+
+def clear_ffmpeg_restart_state(stream_key: str) -> None:
+    """Reset FFmpeg auto-restart counters when a publish session ends."""
+
+    ffmpeg_restart_counts.pop(stream_key, None)
+
+
+def maybe_restart_ffmpeg(stream_key: str, return_code: int) -> None:
+    """Restart FFmpeg while SRS still reports an active publisher."""
+
+    if return_code == 0 or FFMPEG_MAX_RESTARTS <= 0:
+        return
+
+    with process_lock:
+        still_published = stream_key in active_publishers
+        restart_count = ffmpeg_restart_counts.get(stream_key, 0)
+
+    if not still_published:
+        return
+
+    if restart_count >= FFMPEG_MAX_RESTARTS:
+        logger.error(
+            "FFmpeg for %s crashed %s times; auto-restart limit reached",
+            stream_key,
+            restart_count,
+        )
+        return
+
+    user = get_active_user_by_stream_key(stream_key)
+    if user is None:
+        return
+
+    allowed, limit_message = validate_destination_limit(user)
+    if not allowed:
+        logger.error(
+            "Skip FFmpeg restart for %s because destination limit is invalid: %s",
+            stream_key,
+            limit_message,
+        )
+        return
+
+    destinations = get_enabled_destinations(user)
+    if not destinations:
+        return
+
+    ffmpeg_restart_counts[stream_key] = restart_count + 1
+    if FFMPEG_RESTART_DELAY_SECONDS:
+        time.sleep(FFMPEG_RESTART_DELAY_SECONDS)
+
+    with process_lock:
+        if stream_key not in active_publishers:
+            return
+
+    logger.warning(
+        "Restarting FFmpeg for %s after exit code %s (attempt %s/%s)",
+        stream_key,
+        return_code,
+        restart_count + 1,
+        FFMPEG_MAX_RESTARTS,
+    )
+    try:
+        start_ffmpeg(stream_key, destinations)
+    except Exception:
+        logger.exception("Failed to auto-restart FFmpeg for %s", stream_key)
 
 
 def monitor_process(stream_key: str, process: subprocess.Popen[Any]) -> None:
@@ -1022,6 +1093,7 @@ def monitor_process(stream_key: str, process: subprocess.Popen[Any]) -> None:
         logger.info("FFmpeg for %s finished successfully", stream_key)
     else:
         logger.error("FFmpeg for %s exited with code %s", stream_key, return_code)
+        maybe_restart_ffmpeg(stream_key, return_code)
 
 
 def start_ffmpeg(stream_key: str, destinations: list[str]) -> bool:
@@ -1261,7 +1333,7 @@ def api_update_my_stream_title(
 def api_reset_my_stream_key(user: dict[str, Any] = Depends(get_current_api_user)) -> dict[str, Any]:
     """Regenerate current user's stream key and stop old active worker."""
 
-    stop_process(user["stream_key"])
+    stop_process(user["stream_key"], clear_restart_state=True)
     with process_lock:
         active_publishers.pop(user["stream_key"], None)
     success, message, stream_key = regenerate_user_stream_key(int(user["id"]))
@@ -1363,7 +1435,7 @@ def api_admin_set_user_active(
     if target is None:
         raise HTTPException(status_code=404, detail="User not found")
     if not payload.is_active:
-        stop_process(target["stream_key"])
+        stop_process(target["stream_key"], clear_restart_state=True)
     set_user_active(user_id, payload.is_active)
     return {"code": 0, "user": public_user(get_user_by_id(user_id))}
 
@@ -1406,7 +1478,7 @@ def api_admin_reset_stream_key(
     target = get_user_by_id(user_id)
     if target is None:
         raise HTTPException(status_code=404, detail="User not found")
-    stop_process(target["stream_key"])
+    stop_process(target["stream_key"], clear_restart_state=True)
     with process_lock:
         active_publishers.pop(target["stream_key"], None)
     success, message, stream_key = regenerate_user_stream_key(user_id)
@@ -1431,7 +1503,7 @@ def api_admin_stop_stream(
 
     with process_lock:
         active_publishers.pop(stream_key, None)
-    stopped = stop_process(stream_key)
+    stopped = stop_process(stream_key, clear_restart_state=True)
     return {"code": 0, "stream_key": stream_key, "stopped": stopped}
 
 
@@ -1505,28 +1577,35 @@ async def on_publish(request: Request) -> JSONResponse:
     destinations = get_enabled_destinations(user)
     allowed, limit_message = validate_destination_limit(user)
     if not allowed:
-        logger.warning("Stream %s exceeds destination limit: %s", stream_key, limit_message)
-        try:
-            max_destinations = int(user.get("max_destinations") or 0)
-        except (TypeError, ValueError):
-            max_destinations = 0
-        destinations = destinations[:max(0, max_destinations)]
-    try:
-        started = start_ffmpeg(stream_key, destinations)
-    except FileNotFoundError:
-        logger.exception("FFmpeg binary was not found")
-        return srs_error("ffmpeg is not installed", status_code=500)
-    except Exception as exc:
-        logger.exception("Failed to start FFmpeg for %s", stream_key)
-        return srs_error(f"failed to start restream: {exc}", status_code=500)
+        logger.warning("Rejected publish for %s: %s", stream_key, limit_message)
+        return srs_error(limit_message)
 
     published_at = utc_now_iso()
+    clear_ffmpeg_restart_state(stream_key)
     with process_lock:
         active_publishers[stream_key] = {
             "published_at": published_at,
             "destinations": len(destinations),
-            "ffmpeg_started": started,
+            "ffmpeg_started": False,
         }
+
+    try:
+        started = start_ffmpeg(stream_key, destinations)
+    except FileNotFoundError:
+        logger.exception("FFmpeg binary was not found")
+        with process_lock:
+            active_publishers.pop(stream_key, None)
+        return srs_error("ffmpeg is not installed", status_code=500)
+    except Exception as exc:
+        logger.exception("Failed to start FFmpeg for %s", stream_key)
+        with process_lock:
+            active_publishers.pop(stream_key, None)
+        return srs_error(f"failed to start restream: {exc}", status_code=500)
+
+    with process_lock:
+        publisher = active_publishers.get(stream_key)
+        if publisher is not None:
+            publisher["ffmpeg_started"] = started
 
     return JSONResponse(
         status_code=200,
@@ -1551,7 +1630,7 @@ async def on_unpublish(request: Request) -> JSONResponse:
 
     with process_lock:
         active_publishers.pop(stream_key, None)
-    stopped = stop_process(stream_key)
+    stopped = stop_process(stream_key, clear_restart_state=True)
     return JSONResponse(
         status_code=200,
         content={"code": 0, "stream_key": stream_key, "stopped": stopped},
