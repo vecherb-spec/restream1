@@ -34,6 +34,7 @@ load_dotenv(Path(__file__).resolve().parent / ".env")
 import re
 import secrets
 import shutil
+import signal
 import socket
 import smtplib
 import subprocess
@@ -113,7 +114,7 @@ app.add_middleware(
 
 @app.on_event("startup")
 def on_startup() -> None:
-    """Ensure schema migrations run after the app process starts."""
+    """Ensure schema migrations run and recover orphan FFmpeg workers."""
 
     try:
         init_db()
@@ -124,6 +125,17 @@ def on_startup() -> None:
             logger.error("Database is unavailable on startup: %s", detail)
     except Exception:
         logger.exception("Database startup check failed")
+
+    try:
+        recovery = recover_ffmpeg_workers_on_startup()
+        logger.info(
+            "FFmpeg worker recovery: adopted=%s killed=%s restarted=%s",
+            recovery.get("adopted", 0),
+            recovery.get("killed", 0),
+            recovery.get("restarted", 0),
+        )
+    except Exception:
+        logger.exception("FFmpeg worker recovery failed on startup")
 
 
 @app.exception_handler(HTTPException)
@@ -151,7 +163,11 @@ FFMPEG_RW_TIMEOUT_US = max(1_000_000, int(os.getenv("RESTREAM_FFMPEG_RW_TIMEOUT_
 # Kill FFmpeg if -progress stops advancing. 0 disables stall watchdog.
 FFMPEG_STALL_TIMEOUT_SECONDS = max(0.0, float(os.getenv("RESTREAM_FFMPEG_STALL_TIMEOUT_SECONDS", "45")))
 FFMPEG_STALL_GRACE_SECONDS = max(0.0, float(os.getenv("RESTREAM_FFMPEG_STALL_GRACE_SECONDS", "30")))
+# adopt = keep orphan workers and reattach monitors; kill = terminate orphans on boot
+FFMPEG_ORPHAN_POLICY = os.getenv("RESTREAM_FFMPEG_ORPHAN_POLICY", "adopt").strip().lower()
 LOG_DIR = Path(os.getenv("RESTREAM_LOG_DIR", "logs"))
+STATE_DIR = Path(os.getenv("RESTREAM_STATE_DIR", "state"))
+PUBLISHERS_STATE_PATH = STATE_DIR / "active_publishers.json"
 COOKIE_NAME = os.getenv("RESTREAM_COOKIE_NAME", "restream_session")
 COOKIE_MAX_AGE_SECONDS = int(os.getenv("RESTREAM_AUTH_SESSION_DAYS", "7")) * 24 * 60 * 60
 COOKIE_SECURE = os.getenv("RESTREAM_COOKIE_SECURE", "true").lower() == "true"
@@ -609,7 +625,7 @@ def parse_ffmpeg_progress(progress_path: str | Path | None) -> dict[str, Any]:
 def process_snapshot(stream_key: str, entry: dict[str, Any]) -> dict[str, Any]:
     """Serialize a process entry for the admin API."""
 
-    process: subprocess.Popen[Any] = entry["process"]
+    process: Any = entry["process"]
     return_code = process.poll()
     progress_path = entry.get("progress_path") or (
         progress_path_for_log(Path(entry["log_path"])) if entry.get("log_path") else None
@@ -970,6 +986,342 @@ def system_metrics_payload() -> dict[str, Any]:
     }
 
 
+class ExternalProcess:
+    """Minimal handle for an FFmpeg worker that outlived the previous backend."""
+
+    def __init__(self, pid: int) -> None:
+        self.pid = pid
+        self.returncode: int | None = None
+
+    def poll(self) -> int | None:
+        if self.returncode is not None:
+            return self.returncode
+        try:
+            os.kill(self.pid, 0)
+        except ProcessLookupError:
+            self.returncode = -1
+            return self.returncode
+        except PermissionError:
+            return None
+        return None
+
+    def wait(self, timeout: float | None = None) -> int:
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            code = self.poll()
+            if code is not None:
+                return code
+            if deadline is not None and time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(cmd=f"pid:{self.pid}", timeout=timeout or 0)
+            time.sleep(0.2)
+
+    def terminate(self) -> None:
+        try:
+            os.kill(self.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            self.returncode = -1
+
+    def kill(self) -> None:
+        try:
+            os.kill(self.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            self.returncode = -1
+
+
+def persist_publishers_state() -> None:
+    """Write active publishers to disk so restarts can recover live sessions."""
+
+    with process_lock:
+        payload = {
+            key: {
+                "published_at": meta.get("published_at"),
+                "destinations": meta.get("destinations", 0),
+                "ffmpeg_started": bool(meta.get("ffmpeg_started")),
+            }
+            for key, meta in active_publishers.items()
+        }
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp_path = PUBLISHERS_STATE_PATH.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path.replace(PUBLISHERS_STATE_PATH)
+    except OSError:
+        logger.exception("Failed to persist active publishers state")
+
+
+def load_publishers_state() -> dict[str, dict[str, Any]]:
+    """Load previously persisted publisher sessions from disk."""
+
+    if not PUBLISHERS_STATE_PATH.is_file():
+        return {}
+    try:
+        raw = json.loads(PUBLISHERS_STATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        logger.exception("Failed to load active publishers state")
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    result: dict[str, dict[str, Any]] = {}
+    for key, meta in raw.items():
+        if isinstance(key, str) and isinstance(meta, dict):
+            result[key] = meta
+    return result
+
+
+def forget_publisher(stream_key: str) -> None:
+    """Remove a publisher from memory and persisted state."""
+
+    with process_lock:
+        active_publishers.pop(stream_key, None)
+    persist_publishers_state()
+
+
+def extract_stream_key_from_input_url(input_url: str) -> str | None:
+    """Extract stream key from an SRS input URL built via SRS_INPUT_URL_TEMPLATE."""
+
+    template = SRS_INPUT_URL_TEMPLATE
+    if "{stream_key}" not in template:
+        return None
+    prefix, suffix = template.split("{stream_key}", 1)
+    if not input_url.startswith(prefix):
+        return None
+    remainder = input_url[len(prefix) :]
+    if suffix:
+        if not remainder.endswith(suffix):
+            return None
+        remainder = remainder[: -len(suffix)]
+    remainder = remainder.strip("/")
+    return remainder or None
+
+
+def extract_stream_key_from_ffmpeg_args(args: list[str]) -> str | None:
+    """Return stream key from a restream FFmpeg argv list, if recognizable."""
+
+    for index, arg in enumerate(args):
+        if arg == "-i" and index + 1 < len(args):
+            return extract_stream_key_from_input_url(args[index + 1])
+    return None
+
+
+def extract_progress_path_from_ffmpeg_args(args: list[str]) -> Path | None:
+    """Return -progress path from FFmpeg argv when present."""
+
+    for index, arg in enumerate(args):
+        if arg == "-progress" and index + 1 < len(args):
+            value = args[index + 1]
+            if value and value != "pipe:2":
+                return Path(value)
+    return None
+
+
+def count_flv_outputs_in_ffmpeg_args(args: list[str]) -> int:
+    """Count FLV outputs in an FFmpeg argv list."""
+
+    return sum(1 for index, arg in enumerate(args) if arg == "-f" and index + 1 < len(args) and args[index + 1] == "flv")
+
+
+def read_process_cmdline(pid: int) -> list[str] | None:
+    """Read NUL-separated cmdline for a Linux process."""
+
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    return [part.decode("utf-8", "replace") for part in raw.split(b"\0") if part]
+
+
+def discover_orphan_ffmpeg_workers() -> list[dict[str, Any]]:
+    """Find FFmpeg restream workers started by a previous backend process."""
+
+    ffmpeg_name = Path(FFMPEG_BIN).name
+    workers: list[dict[str, Any]] = []
+    try:
+        proc_entries = list(Path("/proc").iterdir())
+    except OSError:
+        return []
+
+    for entry in proc_entries:
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        args = read_process_cmdline(pid)
+        if not args:
+            continue
+        binary_name = Path(args[0]).name
+        if binary_name != ffmpeg_name and binary_name != "ffmpeg":
+            continue
+        stream_key = extract_stream_key_from_ffmpeg_args(args)
+        if not stream_key:
+            continue
+        workers.append(
+            {
+                "pid": pid,
+                "stream_key": stream_key,
+                "args": args,
+                "progress_path": extract_progress_path_from_ffmpeg_args(args),
+                "destinations": count_flv_outputs_in_ffmpeg_args(args),
+            }
+        )
+    return workers
+
+
+def attach_monitor_threads(
+    stream_key: str,
+    process: Any,
+    progress_path: Path,
+    input_url: str | None = None,
+) -> None:
+    """Start monitor/stall(/optional probe) threads for a managed FFmpeg process."""
+
+    threading.Thread(
+        target=monitor_process,
+        args=(stream_key, process),
+        name=f"ffmpeg-monitor-{stream_key}",
+        daemon=True,
+    ).start()
+    threading.Thread(
+        target=watch_ffmpeg_stall,
+        args=(stream_key, process, progress_path),
+        name=f"ffmpeg-stall-{stream_key}",
+        daemon=True,
+    ).start()
+    if input_url:
+        threading.Thread(
+            target=probe_stream_resolution,
+            args=(stream_key, input_url),
+            name=f"ffprobe-resolution-{stream_key}",
+            daemon=True,
+        ).start()
+
+
+def adopt_ffmpeg_worker(worker: dict[str, Any]) -> bool:
+    """Attach monitors to an already-running FFmpeg worker and restore publisher state."""
+
+    stream_key = str(worker["stream_key"])
+    pid = int(worker["pid"])
+    process = ExternalProcess(pid)
+    if process.poll() is not None:
+        return False
+
+    log_path = find_latest_log_path_for_stream(stream_key) or log_path_for_stream(stream_key)
+    progress_path = worker.get("progress_path") or progress_path_for_log(log_path)
+    destinations = int(worker.get("destinations") or 0)
+    published_at = utc_now_iso()
+
+    with process_lock:
+        active_processes[stream_key] = {
+            "process": process,
+            "started_at": published_at,
+            "destinations": destinations,
+            "log_path": log_path,
+            "progress_path": progress_path,
+            "resolution": "",
+            "adopted": True,
+        }
+        active_publishers[stream_key] = {
+            "published_at": published_at,
+            "destinations": destinations,
+            "ffmpeg_started": True,
+            "adopted": True,
+        }
+
+    attach_monitor_threads(stream_key, process, Path(progress_path))
+    logger.warning("Adopted orphan FFmpeg pid=%s stream=%s", pid, stream_key)
+    return True
+
+
+def kill_process_pid(pid: int) -> None:
+    """Best-effort terminate/kill for an orphan PID."""
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        logger.warning("No permission to terminate orphan FFmpeg pid=%s", pid)
+        return
+
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.2)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        return
+
+
+def recover_ffmpeg_workers_on_startup() -> dict[str, int]:
+    """Adopt or kill orphan FFmpeg workers and restore publisher sessions after restart."""
+
+    stats = {"adopted": 0, "killed": 0, "restarted": 0}
+    orphans = discover_orphan_ffmpeg_workers()
+    seen_keys: set[str] = set()
+    adopt = FFMPEG_ORPHAN_POLICY != "kill"
+
+    for worker in sorted(orphans, key=lambda item: int(item["pid"])):
+        stream_key = str(worker["stream_key"])
+        pid = int(worker["pid"])
+        user = get_active_user_by_stream_key(stream_key)
+        duplicate = stream_key in seen_keys
+        if not adopt or user is None or duplicate:
+            kill_process_pid(pid)
+            stats["killed"] += 1
+            logger.warning(
+                "Killed orphan FFmpeg pid=%s stream=%s (reason=%s)",
+                pid,
+                stream_key,
+                "duplicate" if duplicate else ("policy_kill" if user else "unknown_user"),
+            )
+            continue
+        if adopt_ffmpeg_worker(worker):
+            seen_keys.add(stream_key)
+            stats["adopted"] += 1
+        else:
+            stats["killed"] += 1
+
+    persisted = load_publishers_state()
+    for stream_key, meta in persisted.items():
+        if stream_key in seen_keys:
+            continue
+        with process_lock:
+            already_active = stream_key in active_processes
+        if already_active:
+            continue
+        user = get_active_user_by_stream_key(stream_key)
+        if user is None:
+            continue
+        allowed, _message = validate_destination_limit(user)
+        destinations = get_enabled_destinations(user)
+        if not allowed or not destinations:
+            continue
+        with process_lock:
+            active_publishers[stream_key] = {
+                "published_at": meta.get("published_at") or utc_now_iso(),
+                "destinations": len(destinations),
+                "ffmpeg_started": False,
+                "recovered": True,
+            }
+        try:
+            if start_ffmpeg(stream_key, destinations):
+                stats["restarted"] += 1
+                seen_keys.add(stream_key)
+                logger.warning("Restarted FFmpeg for persisted publisher %s", stream_key)
+            else:
+                forget_publisher(stream_key)
+        except Exception:
+            logger.exception("Failed to restart FFmpeg for persisted publisher %s", stream_key)
+            forget_publisher(stream_key)
+
+    persist_publishers_state()
+    return stats
+
+
 def build_ffmpeg_command(
     stream_key: str,
     destinations: list[str],
@@ -1009,9 +1361,11 @@ def stop_process(stream_key: str, *, clear_restart_state: bool = False) -> bool:
     if entry is None:
         return False
 
-    process: subprocess.Popen[Any] = entry["process"]
+    process: Any = entry["process"]
     if process.poll() is not None:
         logger.info("FFmpeg for %s already exited with code %s", stream_key, process.returncode)
+        if clear_restart_state:
+            clear_ffmpeg_restart_state(stream_key)
         return True
 
     logger.info("Stopping FFmpeg for stream %s", stream_key)
@@ -1021,7 +1375,10 @@ def stop_process(stream_key: str, *, clear_restart_state: bool = False) -> bool:
     except subprocess.TimeoutExpired:
         logger.warning("FFmpeg for %s did not stop gracefully; killing it", stream_key)
         process.kill()
-        process.wait(timeout=5)
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            logger.warning("FFmpeg for %s did not exit after kill", stream_key)
 
     snapshot = process_snapshot(stream_key, entry)
     snapshot["ended_at"] = utc_now_iso()
@@ -1099,7 +1456,7 @@ def maybe_restart_ffmpeg(stream_key: str, return_code: int) -> None:
         logger.exception("Failed to auto-restart FFmpeg for %s", stream_key)
 
 
-def monitor_process(stream_key: str, process: subprocess.Popen[Any]) -> None:
+def monitor_process(stream_key: str, process: Any) -> None:
     """Remove a worker from active_processes when FFmpeg exits by itself."""
 
     return_code = process.wait()
@@ -1121,7 +1478,7 @@ def monitor_process(stream_key: str, process: subprocess.Popen[Any]) -> None:
 
 def watch_ffmpeg_stall(
     stream_key: str,
-    process: subprocess.Popen[Any],
+    process: Any,
     progress_path: Path,
 ) -> None:
     """Kill FFmpeg when -progress stops advancing for too long."""
@@ -1214,25 +1571,13 @@ def start_ffmpeg(stream_key: str, destinations: list[str]) -> bool:
             "progress_path": progress_path,
             "resolution": "",
         }
+        publisher = active_publishers.get(stream_key)
+        if publisher is not None:
+            publisher["ffmpeg_started"] = True
+            publisher["destinations"] = len(destinations)
 
-    threading.Thread(
-        target=monitor_process,
-        args=(stream_key, process),
-        name=f"ffmpeg-monitor-{stream_key}",
-        daemon=True,
-    ).start()
-    threading.Thread(
-        target=watch_ffmpeg_stall,
-        args=(stream_key, process, progress_path),
-        name=f"ffmpeg-stall-{stream_key}",
-        daemon=True,
-    ).start()
-    threading.Thread(
-        target=probe_stream_resolution,
-        args=(stream_key, input_url),
-        name=f"ffprobe-resolution-{stream_key}",
-        daemon=True,
-    ).start()
+    attach_monitor_threads(stream_key, process, progress_path, input_url=input_url)
+    persist_publishers_state()
     return True
 
 
@@ -1261,7 +1606,7 @@ def sync_live_restream_worker(user: dict[str, Any]) -> bool:
         if current_publisher is not None:
             current_publisher["destinations"] = len(destinations)
             current_publisher["ffmpeg_started"] = started
-
+    persist_publishers_state()
     return started
 
 
@@ -1421,8 +1766,7 @@ def api_reset_my_stream_key(user: dict[str, Any] = Depends(get_current_api_user)
     """Regenerate current user's stream key and stop old active worker."""
 
     stop_process(user["stream_key"], clear_restart_state=True)
-    with process_lock:
-        active_publishers.pop(user["stream_key"], None)
+    forget_publisher(user["stream_key"])
     success, message, stream_key = regenerate_user_stream_key(int(user["id"]))
     if not success:
         raise HTTPException(status_code=400, detail=message)
@@ -1523,6 +1867,7 @@ def api_admin_set_user_active(
         raise HTTPException(status_code=404, detail="User not found")
     if not payload.is_active:
         stop_process(target["stream_key"], clear_restart_state=True)
+        forget_publisher(target["stream_key"])
     set_user_active(user_id, payload.is_active)
     return {"code": 0, "user": public_user(get_user_by_id(user_id))}
 
@@ -1566,8 +1911,7 @@ def api_admin_reset_stream_key(
     if target is None:
         raise HTTPException(status_code=404, detail="User not found")
     stop_process(target["stream_key"], clear_restart_state=True)
-    with process_lock:
-        active_publishers.pop(target["stream_key"], None)
+    forget_publisher(target["stream_key"])
     success, message, stream_key = regenerate_user_stream_key(user_id)
     if not success:
         raise HTTPException(status_code=400, detail=message)
@@ -1588,8 +1932,7 @@ def api_admin_stop_stream(
 ) -> dict[str, Any]:
     """Stop an active FFmpeg worker as admin."""
 
-    with process_lock:
-        active_publishers.pop(stream_key, None)
+    forget_publisher(stream_key)
     stopped = stop_process(stream_key, clear_restart_state=True)
     return {"code": 0, "stream_key": stream_key, "stopped": stopped}
 
@@ -1675,24 +2018,24 @@ async def on_publish(request: Request) -> JSONResponse:
             "destinations": len(destinations),
             "ffmpeg_started": False,
         }
+    persist_publishers_state()
 
     try:
         started = start_ffmpeg(stream_key, destinations)
     except FileNotFoundError:
         logger.exception("FFmpeg binary was not found")
-        with process_lock:
-            active_publishers.pop(stream_key, None)
+        forget_publisher(stream_key)
         return srs_error("ffmpeg is not installed", status_code=500)
     except Exception as exc:
         logger.exception("Failed to start FFmpeg for %s", stream_key)
-        with process_lock:
-            active_publishers.pop(stream_key, None)
+        forget_publisher(stream_key)
         return srs_error(f"failed to start restream: {exc}", status_code=500)
 
     with process_lock:
         publisher = active_publishers.get(stream_key)
         if publisher is not None:
             publisher["ffmpeg_started"] = started
+    persist_publishers_state()
 
     return JSONResponse(
         status_code=200,
@@ -1715,8 +2058,7 @@ async def on_unpublish(request: Request) -> JSONResponse:
     if not stream_key:
         return srs_error("stream key is required", status_code=400)
 
-    with process_lock:
-        active_publishers.pop(stream_key, None)
+    forget_publisher(stream_key)
     stopped = stop_process(stream_key, clear_restart_state=True)
     return JSONResponse(
         status_code=200,
