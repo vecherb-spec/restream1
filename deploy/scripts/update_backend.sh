@@ -14,6 +14,7 @@ if [[ ! -d "$REPO_DIR/.git" ]]; then
 fi
 
 cd "$REPO_DIR"
+source "$REPO_DIR/deploy/scripts/backend_process.sh"
 git fetch origin
 git checkout "$BRANCH"
 git pull --ff-only origin "$BRANCH"
@@ -34,9 +35,7 @@ if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files "${SERVICE}
   systemctl is-active --quiet "$SERVICE"
   echo "Restarted systemd service: $SERVICE"
 else
-  kill $(pgrep -f "uvicorn main:app") 2>/dev/null || true
-  nohup "$REPO_DIR/.venv/bin/uvicorn" main:app --host 127.0.0.1 --port 8000 > /var/log/restream-backend.log 2>&1 &
-  echo "Backend restarted manually."
+  restart_manual_backend
 fi
 
 curl -fsS "$API_URL" >/dev/null

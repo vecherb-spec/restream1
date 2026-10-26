@@ -65,9 +65,9 @@ echo "Restarting backend..."
 if systemctl list-unit-files restream-backend.service >/dev/null 2>&1; then
   systemctl restart restream-backend
 else
-  kill $(pgrep -f "uvicorn main:app") 2>/dev/null || true
-  cd "$REPO_DIR"
-  nohup .venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000 > /var/log/restream-backend.log 2>&1 &
+  # shellcheck source=/dev/null
+  source "$REPO_DIR/deploy/scripts/backend_process.sh"
+  restart_manual_backend
 fi
 
 sleep 2

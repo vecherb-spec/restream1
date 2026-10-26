@@ -512,7 +512,7 @@ def model_to_dict(model: BaseModel, exclude_unset: bool = False) -> dict[str, An
 def password_reset_url(token: str) -> str:
     """Build public password reset URL for the Next.js app."""
 
-    return f"{PUBLIC_BASE_URL}/?reset_token={token}"
+    return f"{PUBLIC_BASE_URL}/dashboard?reset_token={token}"
 
 
 def send_password_reset_email(user: dict[str, Any], token: str) -> dict[str, Any]:

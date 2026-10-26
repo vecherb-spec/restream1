@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Medialive restream",
-  description: "Client dashboard for SRS/FFmpeg restreaming",
+  description: "Restream-платформа для церковных онлайн-трансляций",
 };
 
 export default function RootLayout({
