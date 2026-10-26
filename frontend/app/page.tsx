@@ -18,12 +18,36 @@ const steps = [
 ];
 
 const features = [
-  "Один исходящий поток из студии вместо отдельных настроек под каждую платформу",
-  "Отдельный статус по каждой площадке: видно, где эфир идет, а где нужен перезапуск",
-  "Автовосстановление FFmpeg-процесса при сетевых сбоях и обрывах направления",
-  "Профили площадок: сохраненные RTMP-адреса и ключи без повторного ввода",
-  "HLS-предпросмотр в кабинете для быстрой проверки входящего сигнала",
-  "Уведомления о старте, остановке и проблемах доставки",
+  {
+    icon: "↗",
+    title: "Один поток на все площадки",
+    text: "Отправляйте один RTMP-поток из студии, а сервис раздаст его по выбранным направлениям.",
+  },
+  {
+    icon: "●",
+    title: "Статус каждого направления",
+    text: "Кабинет показывает, где эфир идет, где идет переподключение и где нужна проверка.",
+  },
+  {
+    icon: "↻",
+    title: "Автовосстановление",
+    text: "Отдельные FFmpeg-процессы перезапускаются при сетевых сбоях без остановки остальных площадок.",
+  },
+  {
+    icon: "◆",
+    title: "Профили площадок",
+    text: "Сохраняйте RTMP-адреса и ключи, чтобы не вводить их заново перед каждым эфиром.",
+  },
+  {
+    icon: "▣",
+    title: "Предпросмотр сигнала",
+    text: "HLS-предпросмотр помогает быстро проверить входящий поток прямо из браузера.",
+  },
+  {
+    icon: "!",
+    title: "Оперативные уведомления",
+    text: "Получайте сигналы о старте, остановке и проблемах доставки на площадки.",
+  },
 ];
 
 const audience = [
@@ -52,6 +76,8 @@ const faqs = [
   },
 ];
 
+const platforms = ["YouTube", "VK Видео", "Rutube", "Telegram", "Twitch", "RTMP"];
+
 export default function LandingPage() {
   return (
     <main className="landing-page">
@@ -75,15 +101,15 @@ export default function LandingPage() {
           <div className="hero-badges" aria-label="Ключевые возможности">
             <span>OBS / vMix</span>
             <span>RTMP / RTMPS</span>
-            <span>YouTube · VK · Rutube · Telegram · Twitch</span>
+            <span>Соцсети и RTMP</span>
           </div>
           <h1 className="hero-title">
-            Один поток —
-            <span> все площадки одновременно</span>
+            Один эфир.
+            <span> Все площадки сразу.</span>
           </h1>
           <p>
-            Запускайте трансляцию один раз из OBS, vMix или аппаратного кодера.
-            Платформа доставит поток на нужные сервисы и покажет состояние каждого направления.
+            Подключите OBS, vMix или аппаратный кодер один раз. Medialive Restream доставит
+            поток на нужные платформы и покажет состояние каждого направления в одном кабинете.
           </p>
           <div className="hero-actions">
             <Link className="button" href="/dashboard">
@@ -95,17 +121,47 @@ export default function LandingPage() {
           </div>
           <p className="hero-note">Тестовая версия. Тарифы и публичная регистрация будут объявлены отдельно.</p>
         </div>
-        <div className="hero-card" aria-label="Схема рестрима">
-          <div className="signal-card source">OBS / vMix</div>
-          <div className="signal-line" />
-          <div className="signal-card core">{PRODUCT_NAME}</div>
-          <div className="destinations-cloud">
-            <span>YouTube</span>
-            <span>VK</span>
-            <span>Rutube</span>
-            <span>Telegram</span>
-            <span>Twitch</span>
+        <div className="dashboard-mockup" aria-label="Макет личного кабинета">
+          <div className="mockup-topbar">
+            <span className="mockup-dot red" />
+            <span className="mockup-dot yellow" />
+            <span className="mockup-dot green" />
+            <strong>{PRODUCT_NAME}</strong>
           </div>
+          <div className="mockup-grid">
+            <div className="mockup-preview">
+              <span className="mockup-live">LIVE</span>
+              <div className="mockup-play">▶</div>
+              <p>Основная трансляция</p>
+            </div>
+            <div className="mockup-side">
+              {["YouTube", "VK Видео", "Rutube", "Telegram", "Twitch"].map((platform, index) => (
+                <div className="mockup-platform" key={platform}>
+                  <span className={index === 2 ? "status-dot yellow" : "status-dot green"} />
+                  <div>
+                    <strong>{platform}</strong>
+                    <small>{index === 2 ? "Переподключение" : "В эфире"}</small>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="mockup-footer">
+            <div>
+              <span>RTMP server</span>
+              <strong>rtmp://.../live</strong>
+            </div>
+            <button>Скопировать ключ</button>
+          </div>
+        </div>
+      </section>
+
+      <section className="platform-strip" aria-label="Поддерживаемые площадки">
+        <span>Транслируйте одновременно:</span>
+        <div>
+          {platforms.map((platform) => (
+            <strong key={platform}>{platform}</strong>
+          ))}
         </div>
       </section>
 
@@ -132,9 +188,12 @@ export default function LandingPage() {
         </div>
         <div className="feature-list">
           {features.map((feature) => (
-            <div className="feature-item" key={feature}>
-              <span>✓</span>
-              <p>{feature}</p>
+            <div className="feature-item" key={feature.title}>
+              <span>{feature.icon}</span>
+              <div>
+                <h3>{feature.title}</h3>
+                <p>{feature.text}</p>
+              </div>
             </div>
           ))}
         </div>
@@ -170,6 +229,20 @@ export default function LandingPage() {
             </article>
           ))}
         </div>
+      </section>
+
+      <section className="landing-section pricing-teaser">
+        <div>
+          <span className="eyebrow">Тарифы</span>
+          <h2>Пакеты для beta будут объявлены отдельно</h2>
+          <p>
+            Сейчас важно проверить стабильность входящего потока, доставку на площадки
+            и удобство кабинета. Коммерческие условия появятся после beta-теста.
+          </p>
+        </div>
+        <Link className="button" href="/dashboard">
+          Начать трансляцию
+        </Link>
       </section>
 
       <section className="landing-section contact-section" id="contact">
