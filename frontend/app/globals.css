@@ -69,8 +69,21 @@ select {
   display: inline-flex;
   align-items: center;
   gap: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.045);
+  padding: 8px 10px;
   font-weight: 900;
   text-decoration: none;
+}
+
+.landing-brand img {
+  display: block;
+  width: auto;
+  height: 34px;
+  max-width: 220px;
+  object-fit: contain;
+  filter: brightness(2.1) saturate(1.08) drop-shadow(0 0 14px rgba(155, 114, 255, 0.22));
 }
 
 .landing-nav nav {
@@ -210,7 +223,7 @@ select {
 
 .destinations-cloud {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
 }
 
@@ -359,6 +372,15 @@ select {
   padding: 22px 0 32px;
   color: var(--muted);
   border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.landing-footer img {
+  display: block;
+  width: auto;
+  height: 30px;
+  max-width: 210px;
+  object-fit: contain;
+  filter: brightness(2.1) saturate(1.08) drop-shadow(0 0 14px rgba(155, 114, 255, 0.22));
 }
 
 .shell {

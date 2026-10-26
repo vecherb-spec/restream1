@@ -1,53 +1,54 @@
 import Link from "next/link";
+import Image from "next/image";
 import { CONTACT_EMAIL, PRODUCT_NAME } from "@/lib/branding";
 
 const steps = [
   {
-    title: "Подключаете OBS или vMix",
-    text: "В личном кабинете копируете RTMP server и stream key, вставляете их в привычный видеокодер.",
+    title: "Подключите encoder",
+    text: "Скопируйте RTMP server и stream key в OBS, vMix или аппаратный кодер.",
   },
   {
-    title: "Выбираете площадки",
-    text: "Добавляете YouTube, VK, Rutube, Telegram или свой RTMP endpoint и включаете нужные направления.",
+    title: "Выберите площадки",
+    text: "Добавьте YouTube, VK, Rutube, Telegram, Twitch или любой RTMP endpoint.",
   },
   {
-    title: "Ведете один эфир",
-    text: `${PRODUCT_NAME} принимает один поток и отправляет его на выбранные площадки одновременно.`,
+    title: "Запустите один эфир",
+    text: `${PRODUCT_NAME} принимает входящий поток и одновременно отправляет его во все выбранные направления.`,
   },
 ];
 
 const features = [
-  "Один входящий поток вместо нескольких нагрузок на компьютер",
-  "Отдельный статус по каждой площадке: видно, где эфир идет, а где нужна проверка",
-  "Автоперезапуск FFmpeg worker при сетевых сбоях",
-  "Stream key хранится в личном кабинете и может быть перевыпущен",
-  "HLS-preview для проверки эфира из браузера",
-  "Telegram-уведомления о старте, остановке и проблемах доставки",
+  "Один исходящий поток из студии вместо отдельных настроек под каждую платформу",
+  "Отдельный live-статус по каждой площадке: видно, где эфир идет, а где нужен перезапуск",
+  "Автовосстановление FFmpeg worker при сетевых сбоях и обрывах destination",
+  "Профили площадок: сохраненные RTMP URL и stream key без повторного ввода",
+  "HLS-preview в кабинете для быстрой проверки входящего сигнала",
+  "Уведомления о старте, остановке и проблемах доставки",
 ];
 
 const audience = [
-  "церквей с небольшой медиакомандой",
-  "волонтеров, которые запускают эфиры по воскресеньям и на событиях",
-  "служений, которым нужно вещать сразу в YouTube, VK, Rutube и Telegram",
-  "команд, которым важны простые инструкции и понятный статус трансляции",
+  "event-команд и организаторов конференций",
+  "продакшн-студий и технических подрядчиков",
+  "блогеров, экспертов и онлайн-школ",
+  "компаний, которым нужен единый контроль multistreaming",
 ];
 
 const faqs = [
   {
-    question: "Нужен ли новый видеокодер?",
-    answer: "Нет. Можно использовать OBS, vMix или другой кодер, который умеет отдавать RTMP-поток.",
+    question: "Нужно менять OBS или vMix?",
+    answer: "Нет. Подойдет любой encoder, который умеет отправлять RTMP-поток.",
   },
   {
-    question: "Можно ли подключить Telegram?",
-    answer: "Да, если у вас есть RTMP endpoint для трансляции в Telegram. Уведомления в Telegram настраиваются отдельно.",
+    question: "Какие площадки можно подключить?",
+    answer: "YouTube, VK, Rutube, Telegram, Twitch и custom RTMP/RTMPS endpoints.",
   },
   {
     question: "Что с тарифами?",
-    answer: "Тарифы скоро появятся. Сейчас проект готовится к тестированию, поэтому условия лучше уточнить у команды проекта.",
+    answer: "Тарифы появятся позже. Сейчас продукт готовится к beta-тесту.",
   },
   {
-    question: "Это заменяет YouTube/VK/Rutube?",
-    answer: "Нет. Сервис помогает отправить один входящий поток сразу на ваши существующие площадки.",
+    question: "Сервис транскодирует видео?",
+    answer: "Текущая версия работает как relay: принимает один поток и передает его дальше без изменения качества.",
   },
 ];
 
@@ -56,8 +57,7 @@ export default function LandingPage() {
     <main className="landing-page">
       <header className="landing-nav">
         <Link className="landing-brand" href="/">
-          <span className="brand-mark">M</span>
-          <span>{PRODUCT_NAME}</span>
+          <Image src="/logo.png" alt={PRODUCT_NAME} width={287} height={34} priority />
         </Link>
         <nav>
           <a href="#how">Как работает</a>
@@ -71,30 +71,29 @@ export default function LandingPage() {
 
       <section className="landing-hero">
         <div className="hero-copy">
-          <span className="eyebrow">Для церковных онлайн-трансляций</span>
+          <span className="eyebrow">Платформа для multistreaming</span>
           <div className="hero-badges" aria-label="Ключевые возможности">
             <span>OBS / vMix</span>
-            <span>RTMP relay</span>
-            <span>YouTube · VK · Rutube · Telegram</span>
+            <span>RTMP / RTMPS</span>
+            <span>YouTube · VK · Rutube · Telegram · Twitch</span>
           </div>
           <h1 className="hero-title">
-            Один церковный эфир —
-            <span> сразу на все площадки</span>
+            Один поток —
+            <span> все площадки одновременно</span>
           </h1>
           <p>
-            Простая restream-платформа для медиаволонтеров: подключаете один поток
-            из OBS или vMix, а сервис аккуратно разводит его по выбранным направлениям
-            и показывает статус каждой площадки.
+            Запускайте трансляцию один раз из OBS, vMix или аппаратного кодера.
+            Платформа доставит поток на нужные сервисы и покажет состояние каждого направления.
           </p>
           <div className="hero-actions">
             <Link className="button" href="/dashboard">
-              Войти в личный кабинет
+              Начать трансляцию
             </Link>
-            <a className="button secondary" href="#contact">
-              Связаться
-            </a>
+            <Link className="button secondary" href="/dashboard">
+              Войти в кабинет
+            </Link>
           </div>
-          <p className="hero-note">Сейчас сервис готовится к тестированию. Цены и пакеты — скоро.</p>
+          <p className="hero-note">Beta-версия. Тарифы и публичная регистрация будут объявлены отдельно.</p>
         </div>
         <div className="hero-card" aria-label="Схема рестрима">
           <div className="signal-card source">OBS / vMix</div>
@@ -105,6 +104,7 @@ export default function LandingPage() {
             <span>VK</span>
             <span>Rutube</span>
             <span>Telegram</span>
+            <span>Twitch</span>
           </div>
         </div>
       </section>
@@ -112,7 +112,7 @@ export default function LandingPage() {
       <section className="landing-section" id="how">
         <div className="section-heading">
           <span className="eyebrow">Как это работает</span>
-          <h2>Три шага перед началом служения</h2>
+          <h2>Три действия перед live-эфиром</h2>
         </div>
         <div className="landing-grid three">
           {steps.map((step, index) => (
@@ -128,7 +128,7 @@ export default function LandingPage() {
       <section className="landing-section" id="features">
         <div className="section-heading">
           <span className="eyebrow">Возможности MVP</span>
-          <h2>Все важное для первых тестовых эфиров</h2>
+          <h2>Контроль доставки без лишней операционной рутины</h2>
         </div>
         <div className="feature-list">
           {features.map((feature) => (
@@ -143,10 +143,11 @@ export default function LandingPage() {
       <section className="landing-section split">
         <div>
           <span className="eyebrow">Для кого</span>
-          <h2>Для церквей, где эфир запускают реальные люди, а не штат инженеров</h2>
+          <h2>Для команд, которым нужно вещать сразу на несколько платформ</h2>
           <p>
-            Интерфейс сделан так, чтобы медиаволонтер видел главное: куда идет эфир,
-            какой stream key использовать и какая площадка требует внимания.
+            Продукт подходит для регулярных эфиров, мероприятий, запусков, конференций,
+            онлайн-курсов и студийного производства. Главное — один стабильный входящий
+            поток и понятный контроль исходящих направлений.
           </p>
         </div>
         <ul className="audience-list">
@@ -159,7 +160,7 @@ export default function LandingPage() {
       <section className="landing-section" id="faq">
         <div className="section-heading">
           <span className="eyebrow">FAQ</span>
-          <h2>Коротко о запуске</h2>
+          <h2>Коротко о запуске и ограничениях</h2>
         </div>
         <div className="faq-list">
           {faqs.map((faq) => (
@@ -174,9 +175,10 @@ export default function LandingPage() {
       <section className="landing-section contact-section" id="contact">
         <div>
           <span className="eyebrow">Контакт</span>
-          <h2>Хотите протестировать restream для вашей церкви?</h2>
+          <h2>Хотите протестировать multistreaming на своем эфире?</h2>
           <p>
-            Напишите команде проекта: расскажите, какие площадки используете и каким кодером ведете эфир.
+            Напишите, какие площадки нужны, какой encoder используете и какой ожидается битрейт.
+            Подскажем, как подготовить beta-тест.
           </p>
         </div>
         <div className="contact-actions">
@@ -190,8 +192,8 @@ export default function LandingPage() {
       </section>
 
       <footer className="landing-footer">
-        <span>{PRODUCT_NAME}</span>
-        <span>Сделано для церковных трансляций</span>
+        <Image src="/logo.png" alt={PRODUCT_NAME} width={254} height={30} />
+        <span>Multistreaming platform</span>
       </footer>
     </main>
   );
