@@ -234,7 +234,7 @@ AUTH_TRUSTED_PROXIES = {
 AUTH_RATE_LIMIT = max(1, int(os.getenv("RESTREAM_AUTH_RATE_LIMIT", "20")))
 AUTH_RATE_WINDOW_SECONDS = max(1, int(os.getenv("RESTREAM_AUTH_RATE_WINDOW_SECONDS", "60")))
 ALLOW_INSECURE_DEFAULTS = os.getenv("RESTREAM_ALLOW_INSECURE_DEFAULTS", "false").lower() == "true"
-FORBIDDEN_SECRET_MARKERS = ("change_me", "changeme", "password", "secret123")
+FORBIDDEN_SECRET_MARKERS = ("change_me", "changeme", "password", "secret123", "replace_with")
 
 active_processes: dict[str, dict[str, Any]] = {}
 active_publishers: dict[str, dict[str, Any]] = {}

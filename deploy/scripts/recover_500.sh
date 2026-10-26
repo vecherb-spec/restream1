@@ -11,6 +11,7 @@ echo "=========================================="
 
 cd "$REPO_DIR"
 source "$REPO_DIR/deploy/scripts/backend_process.sh"
+source "$REPO_DIR/deploy/scripts/frontend_process.sh"
 
 echo
 echo "[1/8] Update code..."
@@ -142,6 +143,8 @@ npm install --silent 2>/dev/null || npm install
 npm run build
 if systemctl list-unit-files restream-frontend.service >/dev/null 2>&1; then
   systemctl restart restream-frontend
+else
+  restart_manual_frontend
 fi
 
 echo

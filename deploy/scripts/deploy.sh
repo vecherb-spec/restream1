@@ -15,6 +15,7 @@ fi
 
 cd "$REPO_DIR"
 source "$REPO_DIR/deploy/scripts/backend_process.sh"
+source "$REPO_DIR/deploy/scripts/frontend_process.sh"
 git fetch origin
 git checkout "$BRANCH"
 git pull --ff-only origin "$BRANCH"
@@ -52,8 +53,10 @@ elif command -v systemctl >/dev/null 2>&1; then
   echo "Systemd services are not installed yet."
   echo "Run: chmod +x deploy/scripts/install_systemd.sh && ./deploy/scripts/install_systemd.sh"
   restart_manual_backend
+  restart_manual_frontend
 else
   restart_manual_backend
+  restart_manual_frontend
 fi
 
 "$REPO_DIR/deploy/scripts/healthcheck.sh"
