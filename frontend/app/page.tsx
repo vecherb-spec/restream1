@@ -4,12 +4,12 @@ import { CONTACT_EMAIL, PRODUCT_NAME } from "@/lib/branding";
 
 const steps = [
   {
-    title: "Подключите encoder",
-    text: "Скопируйте RTMP server и stream key в OBS, vMix или аппаратный кодер.",
+    title: "Подключите кодер",
+    text: "Скопируйте RTMP-сервер и ключ потока в OBS, vMix или аппаратный кодер.",
   },
   {
     title: "Выберите площадки",
-    text: "Добавьте YouTube, VK, Rutube, Telegram, Twitch или любой RTMP endpoint.",
+    text: "Добавьте YouTube, VK, Rutube, Telegram, Twitch или любой RTMP/RTMPS-адрес.",
   },
   {
     title: "Запустите один эфир",
@@ -19,36 +19,36 @@ const steps = [
 
 const features = [
   "Один исходящий поток из студии вместо отдельных настроек под каждую платформу",
-  "Отдельный live-статус по каждой площадке: видно, где эфир идет, а где нужен перезапуск",
-  "Автовосстановление FFmpeg worker при сетевых сбоях и обрывах destination",
-  "Профили площадок: сохраненные RTMP URL и stream key без повторного ввода",
-  "HLS-preview в кабинете для быстрой проверки входящего сигнала",
+  "Отдельный статус по каждой площадке: видно, где эфир идет, а где нужен перезапуск",
+  "Автовосстановление FFmpeg-процесса при сетевых сбоях и обрывах направления",
+  "Профили площадок: сохраненные RTMP-адреса и ключи без повторного ввода",
+  "HLS-предпросмотр в кабинете для быстрой проверки входящего сигнала",
   "Уведомления о старте, остановке и проблемах доставки",
 ];
 
 const audience = [
-  "event-команд и организаторов конференций",
+  "команд мероприятий и организаторов конференций",
   "продакшн-студий и технических подрядчиков",
   "блогеров, экспертов и онлайн-школ",
-  "компаний, которым нужен единый контроль multistreaming",
+  "компаний, которым нужен единый контроль трансляций",
 ];
 
 const faqs = [
   {
     question: "Нужно менять OBS или vMix?",
-    answer: "Нет. Подойдет любой encoder, который умеет отправлять RTMP-поток.",
+    answer: "Нет. Подойдет любой кодер, который умеет отправлять RTMP-поток.",
   },
   {
     question: "Какие площадки можно подключить?",
-    answer: "YouTube, VK, Rutube, Telegram, Twitch и custom RTMP/RTMPS endpoints.",
+    answer: "YouTube, VK, Rutube, Telegram, Twitch и любые пользовательские RTMP/RTMPS-адреса.",
   },
   {
     question: "Что с тарифами?",
-    answer: "Тарифы появятся позже. Сейчас продукт готовится к beta-тесту.",
+    answer: "Тарифы появятся позже. Сейчас продукт готовится к тестовому запуску.",
   },
   {
     question: "Сервис транскодирует видео?",
-    answer: "Текущая версия работает как relay: принимает один поток и передает его дальше без изменения качества.",
+    answer: "Текущая версия передает поток дальше без изменения качества и параметров кодирования.",
   },
 ];
 
@@ -62,7 +62,7 @@ export default function LandingPage() {
         <nav>
           <a href="#how">Как работает</a>
           <a href="#features">Возможности</a>
-          <a href="#faq">FAQ</a>
+          <a href="#faq">Вопросы</a>
         </nav>
         <Link className="button secondary landing-login" href="/dashboard">
           Войти в личный кабинет
@@ -71,7 +71,7 @@ export default function LandingPage() {
 
       <section className="landing-hero">
         <div className="hero-copy">
-          <span className="eyebrow">Платформа для multistreaming</span>
+          <span className="eyebrow">Платформа для одновременных трансляций</span>
           <div className="hero-badges" aria-label="Ключевые возможности">
             <span>OBS / vMix</span>
             <span>RTMP / RTMPS</span>
@@ -93,7 +93,7 @@ export default function LandingPage() {
               Войти в кабинет
             </Link>
           </div>
-          <p className="hero-note">Beta-версия. Тарифы и публичная регистрация будут объявлены отдельно.</p>
+          <p className="hero-note">Тестовая версия. Тарифы и публичная регистрация будут объявлены отдельно.</p>
         </div>
         <div className="hero-card" aria-label="Схема рестрима">
           <div className="signal-card source">OBS / vMix</div>
@@ -112,7 +112,7 @@ export default function LandingPage() {
       <section className="landing-section" id="how">
         <div className="section-heading">
           <span className="eyebrow">Как это работает</span>
-          <h2>Три действия перед live-эфиром</h2>
+          <h2>Три шага до эфира</h2>
         </div>
         <div className="landing-grid three">
           {steps.map((step, index) => (
@@ -159,7 +159,7 @@ export default function LandingPage() {
 
       <section className="landing-section" id="faq">
         <div className="section-heading">
-          <span className="eyebrow">FAQ</span>
+          <span className="eyebrow">Вопросы</span>
           <h2>Коротко о запуске и ограничениях</h2>
         </div>
         <div className="faq-list">
@@ -175,10 +175,10 @@ export default function LandingPage() {
       <section className="landing-section contact-section" id="contact">
         <div>
           <span className="eyebrow">Контакт</span>
-          <h2>Хотите протестировать multistreaming на своем эфире?</h2>
+          <h2>Хотите протестировать одновременную трансляцию?</h2>
           <p>
-            Напишите, какие площадки нужны, какой encoder используете и какой ожидается битрейт.
-            Подскажем, как подготовить beta-тест.
+            Напишите, какие площадки нужны, какой кодер используете и какой ожидается битрейт.
+            Подскажем, как подготовить тестовый запуск.
           </p>
         </div>
         <div className="contact-actions">
@@ -193,7 +193,7 @@ export default function LandingPage() {
 
       <footer className="landing-footer">
         <Image src="/logo.png" alt={PRODUCT_NAME} width={254} height={30} />
-        <span>Multistreaming platform</span>
+        <span>Платформа для одновременных трансляций</span>
       </footer>
     </main>
   );

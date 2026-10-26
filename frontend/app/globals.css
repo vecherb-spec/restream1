@@ -69,10 +69,6 @@ select {
   display: inline-flex;
   align-items: center;
   gap: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.045);
-  padding: 8px 10px;
   font-weight: 900;
   text-decoration: none;
 }
@@ -83,7 +79,7 @@ select {
   height: 34px;
   max-width: 220px;
   object-fit: contain;
-  filter: brightness(2.1) saturate(1.08) drop-shadow(0 0 14px rgba(155, 114, 255, 0.22));
+  filter: brightness(2.25) saturate(1.08) drop-shadow(0 0 14px rgba(155, 114, 255, 0.28));
 }
 
 .landing-nav nav {
@@ -135,6 +131,15 @@ select {
   line-height: 1.02;
   letter-spacing: -0.045em;
   text-wrap: balance;
+}
+
+.landing-page h1,
+.landing-page h2,
+.landing-page h3 {
+  hyphens: none;
+  overflow-wrap: normal;
+  text-wrap: balance;
+  word-break: normal;
 }
 
 .hero-title span {
