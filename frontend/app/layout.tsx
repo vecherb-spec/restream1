@@ -1,8 +1,9 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { PRODUCT_NAME } from "@/lib/branding";
 
 export const metadata: Metadata = {
-  title: "Medialive restream",
+  title: PRODUCT_NAME,
   description: "Restream-платформа для церковных онлайн-трансляций",
 };
 

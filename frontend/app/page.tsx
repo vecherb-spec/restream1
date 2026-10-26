@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { CONTACT_EMAIL, PRODUCT_NAME } from "@/lib/branding";
 
 const steps = [
   {
@@ -11,7 +12,7 @@ const steps = [
   },
   {
     title: "Ведете один эфир",
-    text: "Medialive restream принимает один поток и отправляет его на выбранные площадки одновременно.",
+    text: `${PRODUCT_NAME} принимает один поток и отправляет его на выбранные площадки одновременно.`,
   },
 ];
 
@@ -42,7 +43,7 @@ const faqs = [
   },
   {
     question: "Что с тарифами?",
-    answer: "Тарифы скоро появятся. Сейчас проект готовится к тестированию, поэтому условия лучше уточнить у Medialive.",
+    answer: "Тарифы скоро появятся. Сейчас проект готовится к тестированию, поэтому условия лучше уточнить у команды проекта.",
   },
   {
     question: "Это заменяет YouTube/VK/Rutube?",
@@ -56,7 +57,7 @@ export default function LandingPage() {
       <header className="landing-nav">
         <Link className="landing-brand" href="/">
           <span className="brand-mark">M</span>
-          <span>Medialive restream</span>
+          <span>{PRODUCT_NAME}</span>
         </Link>
         <nav>
           <a href="#how">Как работает</a>
@@ -71,17 +72,26 @@ export default function LandingPage() {
       <section className="landing-hero">
         <div className="hero-copy">
           <span className="eyebrow">Для церковных онлайн-трансляций</span>
-          <h1>Один эфир из OBS или vMix — сразу на YouTube, VK, Rutube и Telegram</h1>
+          <div className="hero-badges" aria-label="Ключевые возможности">
+            <span>OBS / vMix</span>
+            <span>RTMP relay</span>
+            <span>YouTube · VK · Rutube · Telegram</span>
+          </div>
+          <h1 className="hero-title">
+            Один церковный эфир —
+            <span> сразу на все площадки</span>
+          </h1>
           <p>
-            Простая restream-платформа для церквей и медиаволонтеров: меньше настроек,
-            понятный кабинет и контроль доставки на каждую площадку.
+            Простая restream-платформа для медиаволонтеров: подключаете один поток
+            из OBS или vMix, а сервис аккуратно разводит его по выбранным направлениям
+            и показывает статус каждой площадки.
           </p>
           <div className="hero-actions">
             <Link className="button" href="/dashboard">
               Войти в личный кабинет
             </Link>
             <a className="button secondary" href="#contact">
-              Связаться с Medialive
+              Связаться
             </a>
           </div>
           <p className="hero-note">Сейчас сервис готовится к тестированию. Цены и пакеты — скоро.</p>
@@ -89,7 +99,7 @@ export default function LandingPage() {
         <div className="hero-card" aria-label="Схема рестрима">
           <div className="signal-card source">OBS / vMix</div>
           <div className="signal-line" />
-          <div className="signal-card core">Medialive restream</div>
+          <div className="signal-card core">{PRODUCT_NAME}</div>
           <div className="destinations-cloud">
             <span>YouTube</span>
             <span>VK</span>
@@ -166,12 +176,12 @@ export default function LandingPage() {
           <span className="eyebrow">Контакт</span>
           <h2>Хотите протестировать restream для вашей церкви?</h2>
           <p>
-            Напишите Medialive: расскажите, какие площадки используете и каким кодером ведете эфир.
+            Напишите команде проекта: расскажите, какие площадки используете и каким кодером ведете эфир.
           </p>
         </div>
         <div className="contact-actions">
-          <a className="button" href="mailto:info@medialive.ru">
-            info@medialive.ru
+          <a className="button" href={`mailto:${CONTACT_EMAIL}`}>
+            {CONTACT_EMAIL}
           </a>
           <Link className="button secondary" href="/dashboard">
             Личный кабинет
@@ -180,8 +190,8 @@ export default function LandingPage() {
       </section>
 
       <footer className="landing-footer">
-        <span>Medialive restream</span>
-        <span>Сделано Medialive для церковных трансляций</span>
+        <span>{PRODUCT_NAME}</span>
+        <span>Сделано для церковных трансляций</span>
       </footer>
     </main>
   );

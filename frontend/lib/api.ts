@@ -1,3 +1,5 @@
+import { SITE_DOMAIN } from "./branding";
+
 export type User = {
   id: number;
   username: string;
@@ -210,11 +212,11 @@ const API_BASE_URL =
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 
 export const OBS_SERVER_URL =
-  process.env.NEXT_PUBLIC_OBS_SERVER_URL || "rtmp://restream.medialive.ru/live";
+  process.env.NEXT_PUBLIC_OBS_SERVER_URL || `rtmp://${SITE_DOMAIN}/live`;
 
 export const HLS_BASE_URL =
   process.env.NEXT_PUBLIC_HLS_BASE_URL?.replace(/\/$/, "") ||
-  "https://restream.medialive.ru/srs/live";
+  `https://${SITE_DOMAIN}/srs/live`;
 
 function formatApiErrorDetail(detail: unknown, fallback: string): string {
   if (typeof detail === "string" && detail.trim()) {
