@@ -61,7 +61,7 @@ const audience = [
 const faqs = [
   {
     question: "Можно оставить OBS или vMix?",
-    answer: "Нет. Подойдёт любой кодер, который отправляет RTMP-поток.",
+    answer: "Да. Подойдёт любой кодер, который отправляет RTMP-поток.",
   },
   {
     question: "Какие площадки можно подключить?",
@@ -102,7 +102,7 @@ export default function LandingPage() {
             <span> все площадки сразу</span>
           </h1>
           <p>
-            Проведите эфир один раз. Medialive Restream примет поток из OBS, vMix
+            Проведите эфир один раз. {PRODUCT_NAME} примет поток из OBS, vMix
             или аппаратного кодера и отправит его на YouTube, VK Видео, Rutube, Telegram, Twitch и RTMP-площадки.
             Статус каждой площадки видно в кабинете.
           </p>
