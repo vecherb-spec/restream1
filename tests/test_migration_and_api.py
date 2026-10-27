@@ -100,6 +100,19 @@ class MigrationFieldTests(unittest.TestCase):
 
 
 class AuthApiTests(unittest.TestCase):
+    def test_password_reset_url_points_to_dashboard(self) -> None:
+        import main
+
+        previous_base_url = main.PUBLIC_BASE_URL
+        try:
+            main.PUBLIC_BASE_URL = "https://restream.medialive.ru"
+            self.assertEqual(
+                main.password_reset_url("tok"),
+                "https://restream.medialive.ru/dashboard?reset_token=tok",
+            )
+        finally:
+            main.PUBLIC_BASE_URL = previous_base_url
+
     def test_forgot_password_response_is_uniform(self) -> None:
         import main
         from fastapi.testclient import TestClient

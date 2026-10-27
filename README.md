@@ -2,8 +2,9 @@
 
 ## Next.js frontend
 
-The primary web UI lives in `frontend/`. It uses the FastAPI REST API under
-`/api/...` and replaces the earlier Streamlit MVP panel.
+The primary web UI lives in `frontend/`. The site root (`/`) is a public
+Russian landing page for churches. The authenticated client/admin cabinet lives
+under `/dashboard` and uses the FastAPI REST API under `/api/...`.
 
 Local development:
 
@@ -33,6 +34,7 @@ NEXT_PUBLIC_HLS_BASE_URL=https://restream.medialive.ru/srs/live
 Password recovery requires **both** the Next.js frontend and the FastAPI
 backend from the same release. If the login page shows `Not Found` after
 submitting forgot-password, the production backend is still on an older build.
+Password reset links open `/dashboard?reset_token=...`.
 
 Update the backend on the server:
 
@@ -188,6 +190,7 @@ Published ports (production-oriented):
 127.0.0.1:3000 -> frontend (nginx only)
 1935           -> SRS RTMP ingest (OBS/encoder)
 127.0.0.1:8080 -> SRS HTTP/HLS (nginx only)
+127.0.0.1:1985 -> SRS HTTP API (backend ingest telemetry)
 ```
 
 ## Production deploy (systemd)
@@ -279,6 +282,11 @@ http_server {
     enabled         on;
     listen          8080;
     dir             ./objs/nginx/html;
+}
+
+http_api {
+    enabled         on;
+    listen          1985;
 }
 
 vhost __defaultVhost__ {

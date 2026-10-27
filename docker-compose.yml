@@ -28,6 +28,7 @@ services:
       RESTREAM_LOG_DIR: /data/logs
       RESTREAM_STATE_DIR: /data/state
       SRS_INPUT_URL_TEMPLATE: rtmp://srs/live/{stream_key}
+      SRS_API_URL: http://srs:1985
       # Trusted IPs are informational only; webhook secret is always required.
       RESTREAM_SRS_TRUSTED_IPS: ${RESTREAM_SRS_TRUSTED_IPS:-127.0.0.1,::1}
       RESTREAM_ALLOW_INSECURE_DEFAULTS: "false"
@@ -84,6 +85,8 @@ services:
       - "1935:1935"
       # SRS HTTP/HLS only on localhost; expose via nginx if needed
       - "127.0.0.1:8080:8080"
+      # SRS HTTP API for backend ingest telemetry / host diagnostics
+      - "127.0.0.1:1985:1985"
 
 volumes:
   postgres-data:

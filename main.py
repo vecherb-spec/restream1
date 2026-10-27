@@ -47,6 +47,8 @@ import threading
 import time
 import json
 import asyncio
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from pathlib import Path
@@ -186,6 +188,8 @@ SRS_INPUT_URL_TEMPLATE = os.getenv(
     "SRS_INPUT_URL_TEMPLATE",
     "rtmp://localhost/live/{stream_key}",
 )
+SRS_API_URL = os.getenv("SRS_API_URL", "http://127.0.0.1:1985").rstrip("/")
+SRS_API_TIMEOUT_SECONDS = max(0.2, float(os.getenv("SRS_API_TIMEOUT_SECONDS", "1.5")))
 FFMPEG_BIN = os.getenv("FFMPEG_BIN", "ffmpeg")
 FFPROBE_BIN = os.getenv("FFPROBE_BIN", "ffprobe")
 FFMPEG_MAX_RESTARTS = max(0, int(os.getenv("RESTREAM_FFMPEG_MAX_RESTARTS", "5")))
@@ -234,7 +238,7 @@ AUTH_TRUSTED_PROXIES = {
 AUTH_RATE_LIMIT = max(1, int(os.getenv("RESTREAM_AUTH_RATE_LIMIT", "20")))
 AUTH_RATE_WINDOW_SECONDS = max(1, int(os.getenv("RESTREAM_AUTH_RATE_WINDOW_SECONDS", "60")))
 ALLOW_INSECURE_DEFAULTS = os.getenv("RESTREAM_ALLOW_INSECURE_DEFAULTS", "false").lower() == "true"
-FORBIDDEN_SECRET_MARKERS = ("change_me", "changeme", "password", "secret123")
+FORBIDDEN_SECRET_MARKERS = ("change_me", "changeme", "password", "secret123", "replace_with")
 
 active_processes: dict[str, dict[str, Any]] = {}
 active_publishers: dict[str, dict[str, Any]] = {}
@@ -512,7 +516,7 @@ def model_to_dict(model: BaseModel, exclude_unset: bool = False) -> dict[str, An
 def password_reset_url(token: str) -> str:
     """Build public password reset URL for the Next.js app."""
 
-    return f"{PUBLIC_BASE_URL}/?reset_token={token}"
+    return f"{PUBLIC_BASE_URL}/dashboard?reset_token={token}"
 
 
 def send_password_reset_email(user: dict[str, Any], token: str) -> dict[str, Any]:
@@ -1344,10 +1348,87 @@ def probe_stream_resolution(stream_key: str, input_url: str) -> None:
     logger.info("Detected resolution for %s: %s", stream_key, resolution)
 
 
+def _stream_matches_key(stream: dict[str, Any], stream_key: str) -> bool:
+    """Return whether an SRS API stream object refers to our stream key."""
+
+    candidates = [
+        str(stream.get("name") or ""),
+        str(stream.get("stream") or ""),
+        str(stream.get("url") or ""),
+    ]
+    return any(
+        candidate == stream_key
+        or candidate.endswith(f"/{stream_key}")
+        or candidate.endswith(f":{stream_key}")
+        for candidate in candidates
+        if candidate
+    )
+
+
+def _format_ingest_bitrate(kbps_value: Any) -> str:
+    """Format SRS kbps values for the dashboard."""
+
+    try:
+        kbps = float(kbps_value or 0)
+    except (TypeError, ValueError):
+        return ""
+    if kbps <= 0:
+        return ""
+    if kbps >= 1000:
+        return f"{kbps / 1000:.1f} Mbps"
+    return f"{int(round(kbps))} kbps"
+
+
+def fetch_srs_stream_info(stream_key: str) -> dict[str, Any] | None:
+    """Fetch ingest telemetry for one stream directly from the SRS HTTP API."""
+
+    if not stream_key or not SRS_API_URL:
+        return None
+    url = f"{SRS_API_URL}/api/v1/streams/"
+    try:
+        with urllib.request.urlopen(url, timeout=SRS_API_TIMEOUT_SECONDS) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+        return None
+
+    streams = payload.get("streams") if isinstance(payload, dict) else None
+    if not isinstance(streams, list):
+        return None
+    for stream in streams:
+        if not isinstance(stream, dict) or not _stream_matches_key(stream, stream_key):
+            continue
+        if stream.get("live") is False:
+            continue
+        video = stream.get("video") if isinstance(stream.get("video"), dict) else {}
+        kbps = stream.get("kbps") if isinstance(stream.get("kbps"), dict) else {}
+        width = video.get("width")
+        height = video.get("height")
+        resolution = f"{width}x{height}" if width and height else ""
+        fps_value = video.get("fps") or stream.get("fps")
+        try:
+            fps = float(fps_value) if fps_value not in (None, "") else None
+        except (TypeError, ValueError):
+            fps = None
+        bitrate_kbps = kbps.get("recv_30s") or kbps.get("recv") or stream.get("recv_kbps")
+        return {
+            "codec": str(video.get("codec") or ""),
+            "width": width,
+            "height": height,
+            "resolution": resolution,
+            "fps": fps,
+            "bitrate": _format_ingest_bitrate(bitrate_kbps),
+            "bitrate_kbps": bitrate_kbps,
+            "srs_stream_id": stream.get("id"),
+            "client_id": (stream.get("publish") or {}).get("cid") if isinstance(stream.get("publish"), dict) else None,
+        }
+    return None
+
+
 def stream_status_payload(stream_key: str) -> dict[str, Any]:
     """Build the client-facing stream status payload."""
 
     user = get_active_user_by_stream_key(stream_key)
+    ingest = fetch_srs_stream_info(stream_key)
     with process_lock:
         publisher = active_publishers.get(stream_key)
         worker_entries = [
@@ -1381,8 +1462,14 @@ def stream_status_payload(stream_key: str) -> dict[str, Any]:
 
     frame = int(process.get("frame") or 0) if process else 0
     fps = process.get("fps") if process and process.get("fps") is not None else None
+    if fps is None and ingest and ingest.get("fps") is not None:
+        fps = ingest.get("fps")
     bitrate = process.get("bitrate") if process and process.get("bitrate") else ""
+    if not bitrate and ingest:
+        bitrate = str(ingest.get("bitrate") or "")
     resolution = process.get("resolution") if process and process.get("resolution") else ""
+    if not resolution and ingest:
+        resolution = str(ingest.get("resolution") or "")
     dropped_frames = process.get("dropped_frames") if process and process.get("dropped_frames") is not None else None
     running_workers = int(process.get("workers_running") or 0) if process else 0
 
@@ -1424,6 +1511,7 @@ def stream_status_payload(stream_key: str) -> dict[str, Any]:
         "resolution": resolution,
         "dropped_frames": dropped_frames,
         "destinations": destinations,
+        "ingest": ingest,
         "platform_statuses": platform_statuses,
     }
 

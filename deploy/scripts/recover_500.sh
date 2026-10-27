@@ -10,6 +10,8 @@ echo "  Restream recovery (HTTP 500 fix)"
 echo "=========================================="
 
 cd "$REPO_DIR"
+source "$REPO_DIR/deploy/scripts/backend_process.sh"
+source "$REPO_DIR/deploy/scripts/frontend_process.sh"
 
 echo
 echo "[1/8] Update code..."
@@ -111,9 +113,7 @@ if systemctl list-unit-files restream-backend.service >/dev/null 2>&1; then
     exit 1
   }
 else
-  kill $(pgrep -f "uvicorn main:app") 2>/dev/null || true
-  sleep 1
-  nohup "$REPO_DIR/.venv/bin/uvicorn" main:app --host 127.0.0.1 --port 8000 > /var/log/restream-backend.log 2>&1 &
+  restart_manual_backend
   sleep 2
 fi
 
@@ -143,6 +143,8 @@ npm install --silent 2>/dev/null || npm install
 npm run build
 if systemctl list-unit-files restream-frontend.service >/dev/null 2>&1; then
   systemctl restart restream-frontend
+else
+  restart_manual_frontend
 fi
 
 echo

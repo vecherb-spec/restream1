@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -149,6 +150,38 @@ class DestinationMonitoringIsolationTests(unittest.TestCase):
         self.assertEqual(yt["state"], "reconnecting")
         self.assertIsNotNone(yt["next_restart_in_seconds"])
         self.assertLessEqual(int(yt["next_restart_in_seconds"]), 8)
+
+    def test_stream_status_uses_srs_ingest_metrics_without_workers(self) -> None:
+        import main
+
+        stream_key = "live_user_abcd1234ef01"
+        user = {
+            "stream_key": stream_key,
+            "yt_active": 0,
+            "vk_active": 0,
+            "rt_active": 0,
+            "tg_active": 0,
+            "custom_active": 0,
+        }
+        main.active_publishers[stream_key] = {
+            "published_at": "now",
+            "destinations": 0,
+            "ffmpeg_started": False,
+        }
+        ingest = {
+            "resolution": "1920x1080",
+            "fps": 50.0,
+            "bitrate": "6.2 Mbps",
+            "bitrate_kbps": 6200,
+        }
+        with mock.patch("main.get_active_user_by_stream_key", return_value=user):
+            with mock.patch("main.fetch_srs_stream_info", return_value=ingest):
+                payload = main.stream_status_payload(stream_key)
+
+        self.assertEqual(payload["resolution"], "1920x1080")
+        self.assertEqual(payload["fps"], 50.0)
+        self.assertEqual(payload["bitrate"], "6.2 Mbps")
+        self.assertEqual(payload["ingest"], ingest)
 
     def test_worker_restart_does_not_reset_other_destination(self) -> None:
         import main

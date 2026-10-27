@@ -61,6 +61,20 @@ class WebhookSecretTests(unittest.TestCase):
             main.ALLOW_INSECURE_DEFAULTS = previous
             main.SRS_WEBHOOK_SECRET = previous_secret
 
+    def test_validate_runtime_secrets_rejects_env_example_placeholder(self) -> None:
+        import main
+
+        previous = main.ALLOW_INSECURE_DEFAULTS
+        previous_secret = main.SRS_WEBHOOK_SECRET
+        try:
+            main.ALLOW_INSECURE_DEFAULTS = False
+            main.SRS_WEBHOOK_SECRET = "REPLACE_WITH_STRONG_SRS_WEBHOOK_SECRET"
+            with self.assertRaises(RuntimeError):
+                main.validate_runtime_secrets()
+        finally:
+            main.ALLOW_INSECURE_DEFAULTS = previous
+            main.SRS_WEBHOOK_SECRET = previous_secret
+
 
 class WorkerKeyAndRestartTests(unittest.TestCase):
     def test_worker_key_is_stream_and_platform(self) -> None:

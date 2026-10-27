@@ -8,6 +8,11 @@ http_server {
     dir             ./objs/nginx/html;
 }
 
+http_api {
+    enabled         on;
+    listen          1985;
+}
+
 vhost __defaultVhost__ {
     http_hooks {
         enabled         on;
