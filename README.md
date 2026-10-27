@@ -190,6 +190,7 @@ Published ports (production-oriented):
 127.0.0.1:3000 -> frontend (nginx only)
 1935           -> SRS RTMP ingest (OBS/encoder)
 127.0.0.1:8080 -> SRS HTTP/HLS (nginx only)
+127.0.0.1:1985 -> SRS HTTP API (backend ingest telemetry)
 ```
 
 ## Production deploy (systemd)
@@ -281,6 +282,11 @@ http_server {
     enabled         on;
     listen          8080;
     dir             ./objs/nginx/html;
+}
+
+http_api {
+    enabled         on;
+    listen          1985;
 }
 
 vhost __defaultVhost__ {
