@@ -5,7 +5,6 @@ import { HlsPreview } from "@/components/HlsPreview";
 import {
   AdminLiveDashboard,
   BackupInfo,
-  DestinationPlatformId,
   DestinationProfile,
   NotificationSettings,
   OBS_SERVER_URL,
@@ -19,8 +18,6 @@ import {
   applyDestinationProfile,
   changeMyPassword,
   createAdminBackup,
-  createDestinationProfile,
-  deleteDestinationProfile,
   getAdminBackups,
   getAdminDashboardEventsUrl,
   getAdminStreamLogs,
@@ -45,20 +42,11 @@ import {
   stopAdminStream,
   testTelegramNotification,
   updateAdminUserPlan,
-  updateDestinationProfile,
   updateNotificationSettings,
   updateSettings,
   updateStreamTitle,
   userToSettings,
 } from "@/lib/api";
-
-const PLATFORM_LABELS: Record<DestinationPlatformId, string> = {
-  yt: "YouTube",
-  vk: "VK",
-  rt: "Rutube",
-  tg: "Telegram",
-  custom: "Custom RTMP",
-};
 
 type AuthMode = "login" | "register" | "forgot" | "reset";
 type ClientView = "broadcast" | "profile";
@@ -907,12 +895,7 @@ function BroadcastMain({
             <div className="broadcast-empty">
               <div className="empty-orb">LIVE</div>
               <h2>Готово к запуску</h2>
-              <p>Добавьте каналы справа, скопируйте RTMP и ключ в VideoCoder, затем начните трансляцию.</p>
-              <div className="quick-steps">
-                <span>1. Каналы</span>
-                <span>2. RTMP + ключ</span>
-                <span>3. VideoCoder Start</span>
-              </div>
+              <p>Настройте площадки и запустите поток из вашего кодера.</p>
             </div>
           )}
         </div>
@@ -1008,16 +991,6 @@ function ClientProfile({
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
-  const [profiles, setProfiles] = useState<DestinationProfile[]>([]);
-  const [profilesError, setProfilesError] = useState("");
-  const [profilesMessage, setProfilesMessage] = useState("");
-  const [profilesBusy, setProfilesBusy] = useState(false);
-  const [showAddProfile, setShowAddProfile] = useState(false);
-  const [editingProfileId, setEditingProfileId] = useState<number | null>(null);
-  const [profileName, setProfileName] = useState("");
-  const [profilePlatform, setProfilePlatform] = useState<DestinationPlatformId>("yt");
-  const [profileUrl, setProfileUrl] = useState("");
-  const [profileKey, setProfileKey] = useState("");
   const [notifySettings, setNotifySettings] = useState<NotificationSettings | null>(null);
   const [notifyEnabled, setNotifyEnabled] = useState(false);
   const [notifyUsername, setNotifyUsername] = useState("");
@@ -1025,26 +998,8 @@ function ClientProfile({
   const [notifyMessage, setNotifyMessage] = useState("");
   const [notifyError, setNotifyError] = useState("");
 
-  async function reloadProfiles() {
-    const response = await listDestinationProfiles();
-    setProfiles(response.profiles);
-  }
-
   useEffect(() => {
     let active = true;
-    listDestinationProfiles()
-      .then((response) => {
-        if (active) {
-          setProfiles(response.profiles);
-        }
-      })
-      .catch((requestError) => {
-        if (active) {
-          setProfilesError(
-            requestError instanceof Error ? requestError.message : "Не удалось загрузить площадки",
-          );
-        }
-      });
     getNotificationSettings()
       .then((settings) => {
         if (!active) {
@@ -1080,78 +1035,6 @@ function ClientProfile({
       setError(requestError instanceof Error ? requestError.message : "Не удалось сменить пароль");
     } finally {
       setSaving(false);
-    }
-  }
-
-  function resetProfileForm() {
-    setShowAddProfile(false);
-    setEditingProfileId(null);
-    setProfileName("");
-    setProfilePlatform("yt");
-    setProfileUrl("");
-    setProfileKey("");
-  }
-
-  function startEditProfile(profile: DestinationProfile) {
-    setShowAddProfile(true);
-    setEditingProfileId(profile.id);
-    setProfileName(profile.name);
-    setProfilePlatform(profile.platform_id as DestinationPlatformId);
-    setProfileUrl(profile.base_url || "");
-    setProfileKey(profile.stream_key_masked || "************");
-    setProfilesMessage("");
-    setProfilesError("");
-  }
-
-  async function submitProfile(event: React.FormEvent) {
-    event.preventDefault();
-    setProfilesBusy(true);
-    setProfilesError("");
-    setProfilesMessage("");
-    try {
-      if (editingProfileId != null) {
-        await updateDestinationProfile(editingProfileId, {
-          name: profileName,
-          base_url: profilePlatform === "yt" ? undefined : profileUrl,
-          stream_key: profileKey,
-        });
-        setProfilesMessage("Площадка обновлена.");
-      } else {
-        await createDestinationProfile({
-          name: profileName,
-          platform_id: profilePlatform,
-          base_url: profilePlatform === "yt" ? "" : profileUrl,
-          stream_key: profileKey,
-        });
-        setProfilesMessage("Площадка добавлена.");
-      }
-      await reloadProfiles();
-      resetProfileForm();
-    } catch (requestError) {
-      setProfilesError(requestError instanceof Error ? requestError.message : "Не удалось сохранить площадку");
-    } finally {
-      setProfilesBusy(false);
-    }
-  }
-
-  async function removeProfile(profile: DestinationProfile) {
-    if (!window.confirm(`Удалить площадку «${profile.name}»?`)) {
-      return;
-    }
-    setProfilesBusy(true);
-    setProfilesError("");
-    setProfilesMessage("");
-    try {
-      await deleteDestinationProfile(profile.id);
-      await reloadProfiles();
-      setProfilesMessage("Площадка удалена.");
-      if (editingProfileId === profile.id) {
-        resetProfileForm();
-      }
-    } catch (requestError) {
-      setProfilesError(requestError instanceof Error ? requestError.message : "Не удалось удалить площадку");
-    } finally {
-      setProfilesBusy(false);
     }
   }
 
@@ -1213,9 +1096,9 @@ function ClientProfile({
             Логин
             <strong>{user.username}</strong>
           </div>
-          <div className="metric">
+          <div className="metric profile-email-metric">
             Email
-            <strong>{user.email || "-"}</strong>
+            <strong title={user.email || "-"}>{user.email || "-"}</strong>
           </div>
           <div className="metric">
             Тариф
@@ -1226,100 +1109,6 @@ function ClientProfile({
             <strong>до {getEffectiveMaxDestinations(user)}</strong>
           </div>
         </div>
-        <p className="muted">
-          Текущий тариф определяет, сколько площадок можно включить одновременно.
-          Для изменения тарифа обратитесь к администратору.
-        </p>
-      </div>
-
-      <div className="card">
-        <div className="client-log-header">
-          <h2>Площадки</h2>
-          <button
-            className="button secondary"
-            type="button"
-            disabled={profilesBusy}
-            onClick={() => {
-              resetProfileForm();
-              setShowAddProfile(true);
-            }}
-          >
-            + Добавить площадку
-          </button>
-        </div>
-        <div className="destination-profile-list">
-          {profiles.length === 0 && <p className="muted">Сохранённых площадок пока нет.</p>}
-          {profiles.map((profile) => (
-            <div className="destination-profile-row" key={profile.id}>
-              <div>
-                <strong>{profile.name}</strong>
-                <small>{PLATFORM_LABELS[profile.platform_id as DestinationPlatformId] || profile.platform_id}</small>
-              </div>
-              <div className="obs-actions">
-                <button className="button secondary" type="button" disabled={profilesBusy} onClick={() => startEditProfile(profile)}>
-                  Изменить
-                </button>
-                <button className="button danger" type="button" disabled={profilesBusy} onClick={() => void removeProfile(profile)}>
-                  Удалить
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-        {showAddProfile && (
-          <form className="form destination-profile-form" onSubmit={submitProfile}>
-            <h3>{editingProfileId != null ? "Изменить площадку" : "Новая площадка"}</h3>
-            <label className="field">
-              Название
-              <input value={profileName} onChange={(event) => setProfileName(event.target.value)} required />
-            </label>
-            <label className="field">
-              Тип
-              <select
-                value={profilePlatform}
-                disabled={editingProfileId != null}
-                onChange={(event) => setProfilePlatform(event.target.value as DestinationPlatformId)}
-              >
-                {(Object.keys(PLATFORM_LABELS) as DestinationPlatformId[]).map((id) => (
-                  <option key={id} value={id}>
-                    {PLATFORM_LABELS[id]}
-                  </option>
-                ))}
-              </select>
-            </label>
-            {profilePlatform !== "yt" && (
-              <label className="field">
-                RTMP / endpoint URL
-                <input
-                  value={profileUrl}
-                  onChange={(event) => setProfileUrl(event.target.value)}
-                  placeholder="rtmp://..."
-                  required
-                />
-              </label>
-            )}
-            <label className="field">
-              Stream key / secret
-              <input
-                type="password"
-                value={profileKey}
-                onChange={(event) => setProfileKey(event.target.value)}
-                placeholder={editingProfileId != null ? "************" : "stream key"}
-                required={editingProfileId == null}
-              />
-            </label>
-            <div className="obs-actions">
-              <button className="button" disabled={profilesBusy}>
-                {profilesBusy ? "Сохранение..." : "Сохранить"}
-              </button>
-              <button className="button secondary" type="button" disabled={profilesBusy} onClick={resetProfileForm}>
-                Отмена
-              </button>
-            </div>
-          </form>
-        )}
-        {profilesError && <div className="error">{profilesError}</div>}
-        {profilesMessage && <div className="alert">{profilesMessage}</div>}
       </div>
 
       <form className="card form" onSubmit={saveNotifications}>

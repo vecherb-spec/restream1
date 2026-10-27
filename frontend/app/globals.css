@@ -994,23 +994,6 @@ select {
   max-width: 360px;
 }
 
-.quick-steps {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 10px;
-}
-
-.quick-steps span {
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.055);
-  padding: 9px 12px;
-  color: #d8d8e2;
-  font-size: 12px;
-  font-weight: 800;
-}
-
 .broadcast-metrics {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -1070,9 +1053,20 @@ select {
 
 .profile-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
   gap: 12px;
   margin: 16px 0;
+}
+
+.profile-email-metric {
+  grid-column: span 2;
+}
+
+.profile-email-metric strong {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .destination-profile-list {
@@ -1475,5 +1469,9 @@ a.button {
 
   .obs-actions {
     justify-content: flex-start;
+  }
+
+  .profile-email-metric {
+    grid-column: auto;
   }
 }
