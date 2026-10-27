@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Image from "next/image";
 import { HlsPreview } from "@/components/HlsPreview";
 import {
   AdminLiveDashboard,
@@ -616,7 +617,7 @@ function SettingsForm({
               )}
             </div>
             <select
-              aria-label={`Профиль ${platform.title}`}
+              aria-label={`Платформа / сервер ${platform.title}`}
               disabled={platformsBusy}
               value=""
               onChange={(event) => {
@@ -624,7 +625,7 @@ function SettingsForm({
                 event.currentTarget.value = "";
               }}
             >
-              <option value="">Профиль площадки…</option>
+              <option value="">Платформа / сервер…</option>
               {profiles
                 .filter((profile) => profile.platform_id === platform.id)
                 .map((profile) => (
@@ -700,8 +701,7 @@ function BroadcastTopbar({
   return (
     <header className="broadcast-topbar">
       <div className="broadcast-brand">
-        <span className="brand-mark">M</span>
-        <strong>MediaLive</strong>
+        <Image src="/logo.png" alt="Medialive" width={190} height={22} priority />
       </div>
       <div className="broadcast-status-pill">
         <Lamp color={status?.color || "red"} />
