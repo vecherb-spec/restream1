@@ -568,28 +568,6 @@ select {
   background: linear-gradient(135deg, rgba(155, 114, 255, 0.18), rgba(51, 209, 122, 0.08));
 }
 
-.pricing-teaser {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 24px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 28px;
-  background:
-    radial-gradient(circle at 15% 20%, rgba(155, 114, 255, 0.16), transparent 34%),
-    rgba(255, 255, 255, 0.04);
-  padding: 26px;
-}
-
-.pricing-teaser h2 {
-  margin-top: 10px;
-}
-
-.pricing-teaser p {
-  max-width: 680px;
-  margin-bottom: 0;
-}
-
 .landing-footer {
   display: flex;
   align-items: center;
@@ -1429,8 +1407,7 @@ a.button {
     min-height: 260px;
   }
 
-  .mockup-footer,
-  .pricing-teaser {
+  .mockup-footer {
     align-items: stretch;
     flex-direction: column;
   }

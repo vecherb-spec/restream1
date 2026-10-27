@@ -68,10 +68,6 @@ const faqs = [
     answer: "YouTube, VK, Rutube, Telegram, Twitch и любые пользовательские RTMP/SRT-адреса.",
   },
   {
-    question: "Что с тарифами?",
-    answer: "Тарифы появятся позже. Сейчас продукт готовится к тестовому запуску.",
-  },
-  {
     question: "Сервис транскодирует видео?",
     answer: "Текущая версия передает поток дальше без изменения качества и параметров кодирования.",
   },
@@ -218,36 +214,18 @@ export default function LandingPage() {
         </div>
       </section>
 
-      <section className="landing-section pricing-teaser">
-        <div>
-          <span className="eyebrow">Тарифы</span>
-          <h2>Пакеты для beta будут объявлены отдельно</h2>
-          <p>
-            Сейчас важно проверить стабильность входящего потока, доставку на площадки
-            и удобство кабинета. Коммерческие условия появятся после beta-теста.
-          </p>
-        </div>
-        <Link className="button" href="/dashboard">
-          Начать трансляцию
-        </Link>
-      </section>
-
       <section className="landing-section contact-section" id="contact">
         <div>
-          <span className="eyebrow">Контакт</span>
-          <h2>Хотите протестировать одновременную трансляцию?</h2>
-          <p>
-            Напишите, какие площадки нужны, какой кодер используете и какой ожидается битрейт.
-            Подскажем, как подготовить тестовый запуск.
-          </p>
+          <span className="eyebrow">Контакты</span>
+          <h2>Контакты</h2>
         </div>
         <div className="contact-actions">
           <a className="button" href={`mailto:${CONTACT_EMAIL}`}>
             {CONTACT_EMAIL}
           </a>
-          <Link className="button secondary" href="/dashboard">
-            Личный кабинет
-          </Link>
+          <a className="button secondary" href="https://medialive.tech" target="_blank" rel="noopener noreferrer">
+            medialive.tech
+          </a>
         </div>
       </section>
 
