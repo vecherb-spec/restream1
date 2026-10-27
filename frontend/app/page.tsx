@@ -97,15 +97,15 @@ export default function LandingPage() {
 
       <section className="landing-hero">
         <div className="hero-copy">
-          <span className="eyebrow">Платформа для одновременных трансляций</span>
+          <span className="eyebrow">Рестриминг для OBS и vMix</span>
           <div className="hero-badges" aria-label="Ключевые возможности">
             <span>OBS / vMix</span>
             <span>RTMP / RTMPS</span>
             <span>Соцсети и RTMP</span>
           </div>
           <h1 className="hero-title">
-            Один эфир.
-            <span> Все площадки сразу.</span>
+            Один эфир —
+            <span> все площадки сразу</span>
           </h1>
           <p>
             Подключите OBS, vMix или аппаратный кодер один раз. Medialive Restream доставит
@@ -266,7 +266,7 @@ export default function LandingPage() {
 
       <footer className="landing-footer">
         <Image src="/logo.png" alt={PRODUCT_NAME} width={254} height={30} />
-        <span>Платформа для одновременных трансляций</span>
+        <span>Рестриминг на несколько площадок</span>
       </footer>
     </main>
   );
