@@ -9,7 +9,7 @@ const steps = [
   },
   {
     title: "Выберите площадки",
-    text: "Добавьте YouTube, VK, Rutube, Telegram, Twitch или любой RTMP/RTMPS-адрес.",
+    text: "Добавьте YouTube, VK, Rutube, Telegram, Twitch, RTMP или SRT.",
   },
   {
     title: "Запустите один эфир",
