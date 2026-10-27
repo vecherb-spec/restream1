@@ -119,7 +119,6 @@ export default function LandingPage() {
               Войти в кабинет
             </Link>
           </div>
-          <p className="hero-note">Тестовая версия. Тарифы и публичная регистрация будут объявлены отдельно.</p>
         </div>
         <div className="dashboard-mockup" aria-label="Макет личного кабинета">
           <div className="mockup-topbar">
