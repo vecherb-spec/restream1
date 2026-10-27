@@ -4,16 +4,16 @@ import { CONTACT_EMAIL, PRODUCT_NAME } from "@/lib/branding";
 
 const steps = [
   {
-    title: "Подключите кодер",
-    text: "Возьмите RTMP-сервер и ключ в кабинете и вставьте их в OBS, vMix или аппаратный кодер.",
+    title: "Возьмите данные из кабинета",
+    text: "Там же адрес сервера и ключ потока — вставьте их в настройки вещания.",
   },
   {
-    title: "Выберите площадки",
-    text: "Добавьте YouTube, VK Видео, Rutube, Telegram, Twitch, RTMP или SRT.",
+    title: "Включите площадки",
+    text: "YouTube, VK Видео, Rutube, Telegram, Twitch или свой канал по адресу и ключу.",
   },
   {
     title: "Запустите эфир",
-    text: `${PRODUCT_NAME} примет поток и отправит его на выбранные площадки.`,
+    text: "Запустили вещание в студии — раздача на выбранные каналы пойдёт сама.",
   },
 ];
 
@@ -21,32 +21,32 @@ const features = [
   {
     icon: "↗",
     title: "Один поток на все площадки",
-    text: "Проведите эфир один раз. Мы отправим поток на выбранные площадки.",
+    text: "Включили каналы в кабинете — один выход из студии, все получатели сразу.",
   },
   {
     icon: "●",
     title: "Статус каждой площадки",
-    text: "В кабинете видно, где эфир идёт, где идёт переподключение и где нужна помощь.",
+    text: "Видно, кто в эфире, кто переподключается и где сбой.",
   },
   {
     icon: "↻",
     title: "Автовосстановление",
-    text: "Если одна площадка отвалилась, сервис попробует подключить её снова. Остальные продолжат вещать.",
+    text: "Отвалилась одна площадка — попробуем вернуть её, остальные не прервутся.",
   },
   {
     icon: "◆",
     title: "Профили площадок",
-    text: "Сохраните адреса и ключи один раз. Перед следующим эфиром их не придётся вводить заново.",
+    text: "Сохраните URL и ключи — перед следующим эфиром не вводите заново.",
   },
   {
     icon: "!",
     title: "Уведомления в Telegram",
-    text: "Сообщим о старте, остановке и проблемах на площадках.",
+    text: "Старт, стоп и сбои — сообщением в Telegram.",
   },
   {
     icon: "⟲",
     title: "Поддержка SRT и NDI",
-    text: "RTMP уже работает. SRT и NDI запланированы как следующие варианты входа.",
+    text: "Вход уже есть; SRT и NDI добавим следующими.",
   },
 ];
 
@@ -60,16 +60,16 @@ const audience = [
 
 const faqs = [
   {
-    question: "Можно оставить OBS или vMix?",
-    answer: "Да. Подойдёт любой кодер, который отправляет RTMP-поток.",
+    question: "Можно оставить свой софт для вещания?",
+    answer: "Да. Главное — уметь отправить поток на адрес и ключ из кабинета.",
   },
   {
     question: "Какие площадки можно подключить?",
-    answer: "YouTube, VK Видео, Rutube, Telegram, Twitch и свои RTMP/SRT-адреса.",
+    answer: "Популярные соцсети и видеохостинги плюс свои RTMP- или SRT-адреса.",
   },
   {
-    question: "Сервис меняет качество видео?",
-    answer: "Пока нет. Сейчас поток передаётся дальше без изменения качества и параметров кодирования.",
+    question: "Вы перекодируете картинку?",
+    answer: "Нет — параметры и качество остаются такими, как отдаёт ваша студия.",
   },
 ];
 
@@ -93,18 +93,17 @@ export default function LandingPage() {
       <section className="landing-hero">
         <div className="hero-copy">
           <div className="hero-badges" aria-label="Ключевые возможности">
-            <span>OBS / vMix</span>
-            <span>RTMP / SRT</span>
-            <span>Соцсети и RTMP</span>
+            <span>Много площадок</span>
+            <span>Один сигнал</span>
+            <span>Статус в кабинете</span>
           </div>
           <h1 className="hero-title">
             Один эфир —
             <span> все площадки сразу</span>
           </h1>
           <p>
-            Проведите эфир один раз. {PRODUCT_NAME} примет поток из OBS, vMix
-            или аппаратного кодера и отправит его на YouTube, VK Видео, Rutube, Telegram, Twitch и RTMP-площадки.
-            Статус каждой площадки видно в кабинете.
+            Подключите OBS или vMix один раз — эфир сам уйдёт на YouTube, VK, Telegram и другие
+            площадки.
           </p>
           <div className="hero-actions">
             <Link className="button" href="/dashboard">
@@ -142,7 +141,7 @@ export default function LandingPage() {
           </div>
           <div className="mockup-footer">
             <div>
-              <span>RTMP-сервер</span>
+              <span>Сервер</span>
               <strong>rtmp://.../live</strong>
             </div>
             <button>Скопировать ключ</button>
@@ -187,10 +186,10 @@ export default function LandingPage() {
       <section className="landing-section split">
         <div>
           <span className="eyebrow">Для кого</span>
-          <h2>Для команд, которым нужно вещать сразу на несколько платформ</h2>
+          <h2>Когда эфир нужен не на одной площадке</h2>
           <p>
-            Подходит для регулярных богослужений, мероприятий, конференций и онлайн-курсов.
-            Один поток. Один кабинет. Все площадки перед глазами.
+            Богослужения, конференции, вебинары и корпоративные трансляции — один запуск, все каналы
+            на виду.
           </p>
         </div>
         <ul className="audience-list">
@@ -203,7 +202,7 @@ export default function LandingPage() {
       <section className="landing-section" id="faq">
         <div className="section-heading">
           <span className="eyebrow">Вопросы</span>
-          <h2>Коротко о запуске и ограничениях</h2>
+          <h2>Частые вопросы</h2>
         </div>
         <div className="faq-list">
           {faqs.map((faq) => (
