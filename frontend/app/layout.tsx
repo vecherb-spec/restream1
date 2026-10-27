@@ -4,7 +4,7 @@ import { PRODUCT_NAME } from "@/lib/branding";
 
 export const metadata: Metadata = {
   title: PRODUCT_NAME,
-  description: "Рестриминг из OBS и vMix на YouTube, VK Видео, Rutube, Telegram, Twitch и RTMP",
+  description: "Рестриминг из OBS и vMix на YouTube, VK Видео, Rutube, Telegram, Twitch и RTMP-направления",
   icons: {
     icon: "/favicon.png",
     apple: "/favicon.png",

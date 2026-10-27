@@ -46,7 +46,7 @@ const features = [
   {
     icon: "⟲",
     title: "Поддержка SRT и NDI",
-    text: "RTMP работает сейчас; SRT и NDI можно подключить как следующие варианты входящего потока.",
+    text: "RTMP доступен сейчас; SRT и NDI — следующие варианты входящего потока.",
   },
 ];
 
@@ -61,7 +61,7 @@ const audience = [
 const faqs = [
   {
     question: "Нужно менять OBS или vMix?",
-    answer: "Нет. Подойдет любой кодер, который умеет отправлять RTMP-поток.",
+    answer: "Нет. Подойдёт любой кодер, который умеет отправлять RTMP-поток.",
   },
   {
     question: "Какие площадки можно подключить?",
@@ -69,7 +69,7 @@ const faqs = [
   },
   {
     question: "Сервис транскодирует видео?",
-    answer: "Текущая версия передает поток дальше без изменения качества и параметров кодирования.",
+    answer: "Текущая версия передаёт поток дальше без изменения качества и параметров кодирования.",
   },
 ];
 
@@ -102,7 +102,7 @@ export default function LandingPage() {
             <span> все площадки сразу</span>
           </h1>
           <p>
-            Подключите OBS, vMix или аппаратный кодер один раз. Medialive Restream доставит
+            Подключите OBS, vMix или аппаратный кодер один раз — Medialive Restream доставит
             поток на нужные платформы и покажет состояние каждого направления в одном кабинете.
           </p>
           <div className="hero-actions">
@@ -123,7 +123,7 @@ export default function LandingPage() {
           </div>
           <div className="mockup-grid">
             <div className="mockup-preview">
-              <span className="mockup-live">LIVE</span>
+              <span className="mockup-live">ЭФИР</span>
               <div className="mockup-play">▶</div>
               <p>Основная трансляция</p>
             </div>
@@ -141,7 +141,7 @@ export default function LandingPage() {
           </div>
           <div className="mockup-footer">
             <div>
-              <span>RTMP server</span>
+              <span>RTMP-сервер</span>
               <strong>rtmp://.../live</strong>
             </div>
             <button>Скопировать ключ</button>
