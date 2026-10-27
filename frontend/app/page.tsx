@@ -76,8 +76,6 @@ const faqs = [
   },
 ];
 
-const platforms = ["YouTube", "VK Видео", "Rutube", "Telegram", "Twitch", "RTMP"];
-
 export default function LandingPage() {
   return (
     <main className="landing-page">
@@ -152,15 +150,6 @@ export default function LandingPage() {
             </div>
             <button>Скопировать ключ</button>
           </div>
-        </div>
-      </section>
-
-      <section className="platform-strip" aria-label="Поддерживаемые площадки">
-        <span>Транслируйте одновременно:</span>
-        <div>
-          {platforms.map((platform) => (
-            <strong key={platform}>{platform}</strong>
-          ))}
         </div>
       </section>
 

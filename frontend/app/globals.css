@@ -100,7 +100,7 @@ select {
   grid-template-columns: minmax(0, 1.05fr) minmax(320px, 0.95fr);
   gap: 56px;
   align-items: center;
-  padding: 86px 0 78px;
+  padding: 86px 0 48px;
 }
 
 .hero-badges {
@@ -383,41 +383,6 @@ select {
   color: white;
   padding: 10px 12px;
   font-weight: 800;
-}
-
-.platform-strip {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
-  width: min(1120px, calc(100% - 40px));
-  margin: 0 auto 22px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 22px;
-  background: rgba(255, 255, 255, 0.035);
-  padding: 16px 18px;
-}
-
-.platform-strip > span {
-  color: var(--muted);
-  font-size: 13px;
-  font-weight: 800;
-}
-
-.platform-strip div {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  justify-content: flex-end;
-}
-
-.platform-strip strong {
-  border: 1px solid rgba(255, 255, 255, 0.09);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.055);
-  color: #e9e9f3;
-  padding: 9px 12px;
-  font-size: 13px;
 }
 
 .signal-card {
@@ -1431,7 +1396,7 @@ a.button {
 
   .landing-hero {
     grid-template-columns: 1fr;
-    padding: 42px 0 38px;
+    padding: 42px 0 24px;
   }
 
   .hero-title {
@@ -1465,14 +1430,9 @@ a.button {
   }
 
   .mockup-footer,
-  .platform-strip,
   .pricing-teaser {
     align-items: stretch;
     flex-direction: column;
-  }
-
-  .platform-strip div {
-    justify-content: flex-start;
   }
 
   .landing-footer {
