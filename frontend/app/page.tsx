@@ -4,16 +4,16 @@ import { CONTACT_EMAIL, PRODUCT_NAME } from "@/lib/branding";
 
 const steps = [
   {
-    title: "Возьмите данные из кабинета",
-    text: "Там же адрес сервера и ключ потока — вставьте их в настройки вещания.",
+    title: "Подключите OBS или vMix",
+    text: "Скопируйте адрес сервера и ключ из личного кабинета.",
   },
   {
-    title: "Включите площадки",
-    text: "YouTube, VK Видео, Rutube, Telegram, Twitch или свой канал по адресу и ключу.",
+    title: "Добавьте площадки",
+    text: "Укажите ключи YouTube, VK, Rutube, Telegram или любого RTMP-сервера.",
   },
   {
-    title: "Запустите эфир",
-    text: "Запустили вещание в студии — раздача на выбранные каналы пойдёт сама.",
+    title: "Начните трансляцию",
+    text: "Нажмите «Начать трансляцию» в OBS или vMix, дальше эфир сам уйдёт на все площадки.",
   },
 ];
 
@@ -21,55 +21,48 @@ const features = [
   {
     icon: "↗",
     title: "Один поток на все площадки",
-    text: "Включили каналы в кабинете — один выход из студии, все получатели сразу.",
+    text: "Интернет нагружается как при одной трансляции.",
   },
   {
     icon: "●",
     title: "Статус каждой площадки",
-    text: "Видно, кто в эфире, кто переподключается и где сбой.",
+    text: "Сразу видно, где идёт эфир, а где ошибка.",
   },
   {
     icon: "↻",
     title: "Автовосстановление",
-    text: "Отвалилась одна площадка — попробуем вернуть её, остальные не прервутся.",
+    text: "Если площадка отвалилась, сервис подключит её заново, а остальные продолжат работать.",
   },
   {
     icon: "◆",
     title: "Профили площадок",
-    text: "Сохраните URL и ключи — перед следующим эфиром не вводите заново.",
+    text: "Ключи сохраняются, вводить их перед каждым эфиром не нужно.",
   },
   {
     icon: "!",
     title: "Уведомления в Telegram",
-    text: "Старт, стоп и сбои — сообщением в Telegram.",
+    text: "Сообщим о старте, остановке и сбоях.",
   },
   {
     icon: "⟲",
-    title: "Поддержка SRT и NDI",
-    text: "Вход уже есть; SRT и NDI добавим следующими.",
+    title: "Поддержка SRT",
+    text: "Можно подключаться не только по RTMP, но и по SRT, он надёжнее на слабом интернете.",
   },
-];
-
-const audience = [
-  "церкви и религиозные общины",
-  "организаторы мероприятий и конференций",
-  "продакшн-студии",
-  "блогеры и онлайн-школы",
-  "компании",
 ];
 
 const faqs = [
   {
-    question: "Можно оставить свой софт для вещания?",
-    answer: "Да. Главное — уметь отправить поток на адрес и ключ из кабинета.",
+    question: "Подойдёт моя программа для эфира?",
+    answer:
+      "Да, подойдёт любая, которая умеет отправлять поток по RTMP или SRT: OBS, vMix и другие.",
   },
   {
     question: "Какие площадки можно подключить?",
-    answer: "Популярные соцсети и видеохостинги плюс свои RTMP- или SRT-адреса.",
+    answer: "YouTube, VK, Rutube, Telegram, Twitch и любую площадку, которая выдаёт адрес и ключ.",
   },
   {
-    question: "Вы перекодируете картинку?",
-    answer: "Нет — параметры и качество остаются такими, как отдаёт ваша студия.",
+    question: "Качество картинки изменится?",
+    answer: "Нет, на площадки уходит то же видео, что вы отправили.",
   },
 ];
 
@@ -80,37 +73,24 @@ export default function LandingPage() {
         <Link className="landing-brand" href="/">
           <Image src="/logo.png" alt={PRODUCT_NAME} width={287} height={34} priority />
         </Link>
-        <nav>
-          <a href="#how">Как работает</a>
-          <a href="#features">Возможности</a>
-          <a href="#faq">Вопросы</a>
-        </nav>
-        <Link className="button secondary landing-login" href="/dashboard">
-          Войти в личный кабинет
-        </Link>
       </header>
 
       <section className="landing-hero">
         <div className="hero-copy">
-          <div className="hero-badges" aria-label="Ключевые возможности">
-            <span>Много площадок</span>
-            <span>Один сигнал</span>
-            <span>Статус в кабинете</span>
-          </div>
           <h1 className="hero-title">
             Один эфир —
             <span> все площадки сразу</span>
           </h1>
           <p>
-            Подключите OBS или vMix один раз — эфир сам уйдёт на YouTube, VK, Telegram и другие
-            площадки.
+            Отправьте один поток из OBS или vMix, а мы одновременно выведем его на YouTube, VK, Rutube,
+            Telegram и другие площадки.
           </p>
           <div className="hero-actions">
             <Link className="button" href="/dashboard">
               Начать трансляцию
             </Link>
             <Link className="button secondary" href="/dashboard">
-              Войти в кабинет
+              Войти
             </Link>
           </div>
         </div>
@@ -144,16 +124,13 @@ export default function LandingPage() {
               <span>Сервер</span>
               <strong>rtmp://.../live</strong>
             </div>
-            <button>Скопировать ключ</button>
+            <button type="button">Скопировать ключ</button>
           </div>
         </div>
       </section>
 
       <section className="landing-section" id="how">
-        <div className="section-heading">
-          <span className="eyebrow">Как это работает</span>
-          <h2>Три шага до эфира</h2>
-        </div>
+        <h2>Как это работает</h2>
         <div className="landing-grid three">
           {steps.map((step, index) => (
             <article className="landing-card" key={step.title}>
@@ -166,10 +143,7 @@ export default function LandingPage() {
       </section>
 
       <section className="landing-section" id="features">
-        <div className="section-heading">
-          <span className="eyebrow">Возможности</span>
-          <h2>Всё под контролем в одном кабинете</h2>
-        </div>
+        <h2>Всё под контролем в одном кабинете</h2>
         <div className="feature-list">
           {features.map((feature) => (
             <div className="feature-item" key={feature.title}>
@@ -183,27 +157,16 @@ export default function LandingPage() {
         </div>
       </section>
 
-      <section className="landing-section split">
-        <div>
-          <span className="eyebrow">Для кого</span>
-          <h2>Когда эфир нужен не на одной площадке</h2>
-          <p>
-            Богослужения, конференции, вебинары и корпоративные трансляции — один запуск, все каналы
-            на виду.
-          </p>
-        </div>
-        <ul className="audience-list">
-          {audience.map((item) => (
-            <li key={item}>{item}</li>
-          ))}
-        </ul>
+      <section className="landing-section" id="audience">
+        <h2>Для кого</h2>
+        <p>
+          Для церквей и религиозных общин, организаторов мероприятий, продакшн-студий, блогеров,
+          онлайн-школ и компаний.
+        </p>
       </section>
 
       <section className="landing-section" id="faq">
-        <div className="section-heading">
-          <span className="eyebrow">Вопросы</span>
-          <h2>Частые вопросы</h2>
-        </div>
+        <h2>Частые вопросы</h2>
         <div className="faq-list">
           {faqs.map((faq) => (
             <article className="faq-item" key={faq.question}>
@@ -215,12 +178,10 @@ export default function LandingPage() {
       </section>
 
       <section className="landing-section contact-section" id="contact">
-        <div>
-          <h2>Контакты</h2>
-        </div>
+        <h2>Контакты</h2>
         <div className="contact-actions">
           <a className="button" href={`mailto:${CONTACT_EMAIL}`}>
-            {CONTACT_EMAIL}
+            info@medialive.ru
           </a>
           <a className="button secondary" href="https://medialive.tech" target="_blank" rel="noopener noreferrer">
             medialive.tech
